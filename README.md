@@ -18,7 +18,7 @@ Hermes 的飞书通道默认把回复作为普通消息反复编辑。这个插�
 前提：Hermes Agent 已装好并配置了飞书通道（`FEISHU_APP_ID` / `FEISHU_APP_SECRET`），飞书应用在开放平台已授予 **`cardkit:card:write`** 权限（没有这个权限，插件首次尝试后会记录警告并退回原有行为）。
 
 ```bash
-hermes plugins install https://github.com/gengshaowei/hermes-feishu-cardkit
+hermes plugins install https://github.com/wayne3767/hermes-feishu-cardkit
 hermes plugins enable feishu-cardkit
 hermes gateway restart
 ```
