@@ -1,6 +1,84 @@
 # hermes-feishu-cardkit
 
-Native streaming cards for [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s Feishu / Lark channel.
+Native streaming cards for the Feishu / Lark channel of [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+
+[English](#english) · [中文](#中文)
+
+## English
+
+**Feishu and Lark are the same product.** ByteDance ships it as Feishu (飞书, `feishu.cn`) inside China and as Lark (`larksuite.com`) everywhere else. Hermes's bundled adapter talks to both through one SDK; the `FEISHU_DOMAIN` setting (`feishu` or `lark`) selects the endpoint. This plugin works on both and picks its wording from that setting: Chinese card labels on Feishu, English on Lark (override with `FEISHU_CARD_LOCALE`).
+
+### What it changes
+
+Out of the box, Hermes delivers a Feishu/Lark reply as a plain message that gets edited over and over while the model writes. With this plugin every turn becomes **one CardKit streaming card**:
+
+- The card appears the moment the model starts; text renders with the platform's typewriter animation as tokens arrive.
+- A status header (Generating / Done / Stopped) and a footer with elapsed time, model and tool-call count.
+- Tool calls fold into a collapsed **"Thinking & tools · N tool calls"** panel instead of a stream of progress messages.
+- Inline LaTeX becomes Unicode math text (`\delta_p` → δₚ, `\frac{a}{b}` → (a)/(b)); display formulas are typeset into images when `matplotlib` is available.
+- Images the model attaches (`MEDIA:` lines) are placed inside the card where the model put them, with centred **"Figure N · title"** captions; markdown tables get a **"Table N · title"** heading.
+- Every step degrades to Hermes's normal delivery on failure (missing CardKit scope, upload error, oversized answer, an incompatible Hermes build). Text and images are never lost.
+
+### How it works — no core patches
+
+Hermes already has a native streaming pipeline that its DingTalk and WeCom adapters use; the Feishu adapter simply never implemented it. This plugin subclasses the bundled Feishu adapter and implements that interface (`send_stream_frame`, `supports_native_streaming`, plus the `extract_media` / `send_multiple_images` hooks for attachments). At startup it re-registers the `feishu` platform entry; Hermes's platform registry is last-writer-wins and user plugins load after bundled ones, so **no file in the Hermes checkout is modified** and `hermes update` cannot undo the install. Registration itself is lazy: the bundled adapter (about 200 ms to import) is only loaded when the gateway actually builds it, never on plain `hermes` startup. If a future Hermes drops one of the few adapter seams the plugin relies on, it logs a warning and hands the platform back to the bundled adapter.
+
+### Install
+
+Requirements: Hermes Agent with the Feishu/Lark channel configured (`FEISHU_APP_ID`, `FEISHU_APP_SECRET`), and the app granted the **`cardkit:card:write`** scope in the developer console (`open.feishu.cn` or `open.larksuite.com`). Without that scope the first attempt logs a warning and the plugin falls back to the bundled behaviour.
+
+```bash
+hermes plugins install https://github.com/wayne3767/hermes-feishu-cardkit
+hermes plugins enable feishu-cardkit
+hermes gateway restart
+```
+
+Repeat per profile if you run several (`hermes -p <profile> plugins install …`).
+
+Optional: display formulas are typeset as images when the `matplotlib` package is present in Hermes's own Python environment (`~/.hermes/hermes-agent/venv`). Without it the plugin works unchanged and formulas stay Unicode text.
+
+### Configuration
+
+| Env var / `config.yaml` key | Default | Effect |
+|---|---|---|
+| `FEISHU_STREAMING_CARD` / `platforms.feishu.streaming_card` | `true` | `false` restores the bundled behaviour |
+| `FEISHU_CARD_MATH_IMAGES` / `platforms.feishu.card_math_images` | `true` | Typeset display formulas as images (needs matplotlib) |
+| `FEISHU_CARD_LOCALE` / `platforms.feishu.card_locale` | empty | Card wording `zh` / `en`; default follows `FEISHU_DOMAIN` |
+| `display.platforms.feishu.tool_progress` | Hermes default `new` | `all` records every tool call in the timeline, without merging repeats |
+
+Streaming as a whole is governed by Hermes's general `streaming.enabled` setting.
+
+### Letting the model produce figures and table titles
+
+The card can embed figures and caption them, but whether the model draws anything is up to your prompt. Add something like this to the profile's `SOUL.md`:
+
+```
+- When explaining distributions, curves or geometry, showing data trends or comparisons, or describing how a system works, draw a figure with Python matplotlib.
+- Name the file after the figure's title: /tmp/hermes_fig_<title>_<timestamp>.png. Put the MEDIA:/tmp/….png line where the figure belongs in the text; the card adds "Figure N · title" itself, so do not write your own caption.
+- Put a single line "Table N: title" above every markdown table; keep tables to 5 data rows (a Feishu card limit).
+```
+
+### Known limits
+
+- Feishu card tables render at most 5 data rows and 4 tables per element; longer tables are cut by the platform.
+- Matrices, `cases`, multi-line alignment environments and formulas containing CJK text are not typeset as images; they fall back to Unicode.
+- Card JSON is capped at 30 KB; an oversized answer shows its head in the card and the rest goes out as ordinary messages.
+- Hermes does not expose the model's reasoning or token usage to adapters, so the card has neither.
+
+### Development
+
+```bash
+# needs a Hermes checkout and a Python with its dependencies; defaults to ~/.hermes/hermes-agent
+HERMES_AGENT_ROOT=/path/to/hermes-agent python -m pytest tests -q
+```
+
+### Acknowledgements and license
+
+The card's visual structure (status header, collapsed "Thinking & tools" panel, "Done · duration · model" footer) follows the UI of [baileyh8/hermes-feishu-streaming-card](https://github.com/baileyh8/hermes-feishu-streaming-card) (MIT). No code from that project is used; this is an independent implementation on Hermes's native streaming interface that patches nothing upstream.
+
+MIT licensed (see `LICENSE`). At runtime the plugin subclasses the Feishu adapter of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) (MIT, Copyright (c) 2025 Nous Research) but does not include or redistribute its code.
+
+## 中文
 
 Hermes 的飞书通道默认把回复作为普通消息反复编辑。这个插件把每一轮回复变成**一张飞书 CardKit 流式卡片**：
 
