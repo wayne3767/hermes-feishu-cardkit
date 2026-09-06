@@ -17,7 +17,7 @@ from feishu_cardkit.math_text import convert_math, latex_to_unicode
     (r"10^{-3}, v_{\max}, \rho_{\text{介质}}", "10⁻³, vₘₐₓ, ρ_介质"),
     (r"\begin{bmatrix} a & b \\ c & d \end{bmatrix}", "[a b; c d]"),
     (r"\begin{pmatrix} 1 & 0 \\ 0 & 1 \end{pmatrix}", "(1 0; 0 1)"),
-    (r"\hat{x}, \bar{y}, \vec{v}, \sqrt[3]{8}", "x\u0302, y\u0304, v\u20d7, ³√8"),
+    (r"\hat{x}, \bar{y}, \vec{v}, \sqrt[3]{8}", "x̂, ȳ, v⃗, ³√8"),
     (r"\lim_{n \to \infty} a_n, \log_2 n, e^{i\pi} + 1 = 0", "lim_(n → ∞) aₙ, log₂ n, e^iπ + 1 = 0"),
     (r"\eta = \frac{\gamma_c (\beta - \alpha)}{\alpha (\beta - \theta)} \times 100\%", "η = (γ_c (β - α))/(α (β - θ)) × 100%"),
     (r"\mathrm{d}\rho / \mathrm{d}t \cdot \Delta \theta", "dρ / dt · Δ θ"),

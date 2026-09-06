@@ -82,8 +82,9 @@ _TABLE_CAPTION_RE = re.compile(r"^\s*\**\s*(?:表|Table)\s*\d+\s*[.:：、\-–�
 _FIGURE_CAPTION_RE = re.compile(r"^\s*(?:图|Figure|Fig\.?)\s*\d+\s*[.:：、\-–—\s]*(.*?)\s*$")
 _FILENAME_NOISE_RE = re.compile(
     r"^(?:hermes_)?fig(?:ure)?[_\-]?|[_\-]?\d{6,}(?:[_\-]\d+)?$|[_\-]?\d{4}-\d{2}-\d{2}[T_\-]?[\d\-:]*$", re.IGNORECASE)
-_MEDIA_PLACEHOLDER = "⁣hermes-media-{index}⁣"
-_MEDIA_PLACEHOLDER_RE = re.compile("⁣hermes-media-(\\d+)⁣")
+# Marker for a MEDIA line while the answer is re-rendered; replaced before anything is sent.
+_MEDIA_PLACEHOLDER = "{{hermes-media-%d}}"
+_MEDIA_PLACEHOLDER_RE = re.compile(r"\{\{hermes-media-(\d+)\}\}")
 
 # (local path, image_key, alt text) for one delivered image
 ImageItem = Tuple[str, str, str]
@@ -203,7 +204,7 @@ def place_images(raw: str, items: List[ImageItem], render: MarkdownRenderer, lab
         if index is None or index in numbers:
             return match.group(0)
         numbers[index] = len(numbers) + 1
-        return _MEDIA_PLACEHOLDER.format(index=index)
+        return _MEDIA_PLACEHOLDER % index
 
     lines = MEDIA_TAG_CLEANUP_RE.sub(_swap, raw).split("\n")
     if not numbers:
@@ -224,7 +225,7 @@ def place_images(raw: str, items: List[ImageItem], render: MarkdownRenderer, lab
     for index in range(len(items)):
         if index not in numbers:
             numbers[index] = len(numbers) + 1
-            text = text.rstrip() + "\n\n" + _MEDIA_PLACEHOLDER.format(index=index)
+            text = text.rstrip() + "\n\n" + _MEDIA_PLACEHOLDER % index
 
     def _fill(match: "re.Match[str]") -> str:
         index = int(match.group(1))

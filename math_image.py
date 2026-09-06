@@ -31,7 +31,7 @@ MATH_IMAGE_DPI = 200
 MATH_IMAGE_CANVAS_INCHES = 7.0
 MATH_IMAGE_MIN_HEIGHT_INCHES = 0.45
 _CACHE_MAX = 64
-_CJK_RE = re.compile(r"[\u3000-\u9fff\uff00-\uffef]")
+_CJK_RE = re.compile("[　-鿿＀-￯]")  # CJK punctuation, ideographs, full-width forms
 _UNSUPPORTED_RE = re.compile(r"\\begin\{|\\end\{|\\\\|\\over(?![a-zA-Z])|\\underbrace|\\overbrace|\\stackrel|\\substack|\\mbox|\\tag")
 _REWRITES = (
     (re.compile(r"\\(?:displaystyle|textstyle|scriptstyle|nonumber|limits|nolimits)\b"), ""),

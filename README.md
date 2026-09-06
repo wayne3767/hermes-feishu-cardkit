@@ -25,11 +25,7 @@ hermes gateway restart
 
 多 profile 用户对每个需要的 profile 分别执行（`hermes -p <profile> plugins install …`）。
 
-可选：块级公式排版成图片需要 matplotlib，装到 Hermes 的 venv 里：
-
-```bash
-~/.hermes/hermes-agent/venv/bin/pip install matplotlib
-```
+可选：块级公式排版成图片需要 `matplotlib` 这个包存在于 Hermes 自己的 Python 环境（`~/.hermes/hermes-agent/venv`）里。没有它插件照常工作，只是公式以 Unicode 文本显示。
 
 ## 配置
 
