@@ -23,6 +23,7 @@ interface and shares no code with it beyond the wording and ``format_duration``.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -37,10 +38,15 @@ TIMELINE_ELEMENT_ID = "hermes_timeline_md"
 FOOTER_ELEMENT_ID = "hermes_footer"
 DEFAULT_CARD_TITLE = "Hermes Agent"
 SEED_PLACEHOLDER = "…"
-# Feishu rejects card JSON above 30 KB; leave headroom for the card envelope and JSON escaping.
+# Feishu rejects card JSON above 30 KB.  CARD_JSON_MAX_BYTES caps the serialized card actually
+# sent (envelope, timeline, footer and JSON escaping included); CARD_MAX_BYTES caps the raw answer.
+CARD_JSON_MAX_BYTES = 28000
 CARD_MAX_BYTES = 24000
 TIMELINE_MAX_LINES = 40
 TIMELINE_MAX_BYTES = 6000
+# Timeline budget when the whole card is over CARD_JSON_MAX_BYTES (the timeline gives way first).
+TIMELINE_SLIM_LINES = 8
+TIMELINE_SLIM_BYTES = 1500
 ACTIVITY_MAX_CHARS = 60
 
 PHASE_RUNNING, PHASE_DONE, PHASE_STOPPED = "running", "done", "stopped"
@@ -61,13 +67,15 @@ class Labels:
     table: str
     picture: str  # fallback figure title
     tool_only: str  # answer placeholder for a tool-only turn
+    clipped_head: str  # heads a running answer that shows only its newest paragraphs
 
 
 ZH = Labels(running="生成中", done="已完成", stopped="已停止", generating="生成中…", timeline_empty="尚无工具调用",
-            omitted="… 已省略 {n} 行", tools="{n} 次工具调用", figure="图{n}", table="表{n}", picture="图片", tool_only="✅")
+            omitted="… 已省略 {n} 行", tools="{n} 次工具调用", figure="图{n}", table="表{n}", picture="图片", tool_only="✅",
+            clipped_head="…（前文较长已省略，完整内容在生成结束后给出）")
 EN = Labels(running="Generating", done="Done", stopped="Stopped", generating="Generating…", timeline_empty="No tool calls yet",
             omitted="… {n} earlier lines omitted", tools="{n} tool calls", figure="Figure {n}", table="Table {n}", picture="Image",
-            tool_only="✅")
+            tool_only="✅", clipped_head="… (earlier text omitted; the full answer follows when done)")
 _LABELS = {"zh": ZH, "en": EN}
 
 
@@ -104,6 +112,57 @@ def truncate_utf8(text: str, max_bytes: int) -> str:
     return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
 
 
+def json_text_bytes(text: str) -> int:
+    """Bytes ``text`` occupies inside the card JSON (quotes and escapes included)."""
+    return utf8_len(json.dumps(text, ensure_ascii=False))
+
+
+def card_json_bytes(card: Dict[str, Any]) -> int:
+    """Size of the card exactly as serialized for CardKit (``ensure_ascii=False``)."""
+    return utf8_len(json.dumps(card, ensure_ascii=False))
+
+
+def _fence_open(text: str) -> bool:
+    return sum(line.lstrip().startswith("```") for line in text.split("\n")) % 2 == 1
+
+
+def clip_markdown_head(text: str, max_bytes: int, note: str) -> str:
+    """The beginning of ``text`` within ``max_bytes``, cut at a paragraph (else line) boundary,
+    an unclosed ``` fence or ``$$`` block closed, then ``note``."""
+    if utf8_len(text) <= max_bytes:
+        return text
+    head = truncate_utf8(text, max(0, max_bytes - utf8_len(note) - 8))  # room for closers + note
+    for boundary in ("\n\n", "\n"):
+        cut = head.rfind(boundary)
+        if cut >= len(head) // 2:
+            head = head[:cut]
+            break
+    head = head.rstrip()
+    if _fence_open(head):
+        head += "\n```"
+    elif head.count("$$") % 2:
+        head += "$$"
+    return f"{head}\n\n{note}" if head else note
+
+
+def clip_markdown_tail(text: str, max_bytes: int, note: str) -> str:
+    """``note`` then the end of ``text`` within ``max_bytes``, starting at a paragraph (else line)
+    boundary; a ``` fence or ``$$`` block open at the cut is reopened so the tail renders alike."""
+    if utf8_len(text) <= max_bytes:
+        return text
+    data = text.encode("utf-8")
+    keep = max(0, max_bytes - utf8_len(note) - 8)  # room for the note and a reopener
+    tail = data[len(data) - keep:].decode("utf-8", errors="ignore") if keep else ""
+    for boundary in ("\n\n", "\n"):
+        cut = tail.find(boundary)
+        if 0 <= cut <= len(tail) // 2:
+            tail = tail[cut + len(boundary):]
+            break
+    prefix = text[:len(text) - len(tail)]
+    opener = "```\n" if _fence_open(prefix) else "$$\n" if prefix.count("$$") % 2 else ""
+    return f"{note}\n\n{opener}" + tail.lstrip("\n")
+
+
 def format_duration(seconds: float) -> str:
     """``32s`` / ``2m57s`` / ``1h2m3s`` (same shape as hermes-feishu-streaming-card's footer)."""
     total = max(0, int(round(seconds)))
@@ -134,12 +193,13 @@ def summary_for(markdown: str, phase: str, labels: Labels = ZH) -> str:
 
 # --- Timeline / footer ----------------------------------------------------------------------------
 
-def render_timeline(lines: List[str], labels: Labels = ZH) -> str:
-    """Timeline markdown: newest ``TIMELINE_MAX_LINES`` lines within the byte budget."""
+def render_timeline(lines: List[str], labels: Labels = ZH, *, max_lines: int = TIMELINE_MAX_LINES,
+                    max_bytes: int = TIMELINE_MAX_BYTES) -> str:
+    """Timeline markdown: newest ``max_lines`` lines within ``max_bytes`` (0 lines: the count only)."""
     if not lines:
         return labels.timeline_empty
-    kept = list(lines[-TIMELINE_MAX_LINES:])
-    while len(kept) > 1 and utf8_len("\n".join(kept)) > TIMELINE_MAX_BYTES:
+    kept = list(lines[-max_lines:]) if max_lines > 0 else []
+    while len(kept) > 1 and utf8_len("\n".join(kept)) > max_bytes:
         kept.pop(0)
     if len(kept) < len(lines):
         kept.insert(0, labels.omitted.format(n=len(lines) - len(kept)))
@@ -299,17 +359,20 @@ def layout_answer_elements(markdown: str, labels: Labels = ZH) -> List[Dict[str,
 
 def build_stream_card(
     *, title: str, markdown: str, timeline_md: str, tool_count: int, footer: str, phase: str, summary: str = "",
-    labels: Labels = ZH,
+    labels: Labels = ZH, streaming: Optional[bool] = None, plain: bool = False,
 ) -> Dict[str, Any]:
     """Card JSON 2.0 for one turn.  ``markdown`` is the answer exactly as it should show (math and
-    images already rendered); streaming mode is on only while ``phase`` is running."""
+    images already rendered); streaming mode is on only while ``phase`` is running (``streaming=False``
+    keeps it off: a running card past CardKit's streaming window).  ``plain`` keeps a finished
+    answer in one element instead of the figure / table layout (the slim fallback card)."""
     subtitle = {PHASE_DONE: labels.done, PHASE_STOPPED: labels.stopped}.get(phase, labels.running)
     template = _PHASE_TEMPLATE[phase]
-    streaming = phase == PHASE_RUNNING
+    running = phase == PHASE_RUNNING
+    streaming = running and streaming is not False
     body = markdown or SEED_PLACEHOLDER
-    elements = ([{"tag": "markdown", "element_id": ANSWER_ELEMENT_ID, "content": body}] if streaming
+    elements = ([{"tag": "markdown", "element_id": ANSWER_ELEMENT_ID, "content": body}] if running or plain
                 else layout_answer_elements(body, labels))
-    if streaming or tool_count:
+    if running or tool_count:
         elements.append({
             "tag": "collapsible_panel", "element_id": TIMELINE_PANEL_ID, "expanded": False,
             "header": {"title": {"tag": "plain_text", "content": timeline_title(tool_count, labels)},
@@ -344,11 +407,18 @@ def timeline_update_actions(tool_count: int, timeline_md: str, footer: str, labe
     ]
 
 
+def footer_update_actions(footer: str) -> List[Dict[str, Any]]:
+    """Batch action rewriting the footer alone (last-resort seal when full updates keep failing)."""
+    return [{"action": "partial_update_element", "params": {"element_id": FOOTER_ELEMENT_ID, "partial_element": {"content": footer}}}]
+
+
 __all__ = [
     "ANSWER_ELEMENT_ID", "TIMELINE_PANEL_ID", "TIMELINE_ELEMENT_ID", "FOOTER_ELEMENT_ID", "DEFAULT_CARD_TITLE",
-    "SEED_PLACEHOLDER", "CARD_MAX_BYTES", "TIMELINE_MAX_LINES", "TIMELINE_MAX_BYTES",
+    "SEED_PLACEHOLDER", "CARD_JSON_MAX_BYTES", "CARD_MAX_BYTES", "TIMELINE_MAX_LINES", "TIMELINE_MAX_BYTES",
+    "TIMELINE_SLIM_LINES", "TIMELINE_SLIM_BYTES",
     "ACTIVITY_MAX_CHARS", "PHASE_RUNNING", "PHASE_DONE", "PHASE_STOPPED", "ImageItem", "Labels", "ZH", "EN", "labels_for",
-    "utf8_len", "truncate_utf8", "format_duration", "render_answer", "summary_for", "render_timeline",
+    "utf8_len", "truncate_utf8", "json_text_bytes", "card_json_bytes", "clip_markdown_head", "clip_markdown_tail",
+    "format_duration", "render_answer", "summary_for", "render_timeline",
     "timeline_title", "render_footer", "title_from_filename", "image_block", "append_images", "place_images",
-    "layout_answer_elements", "build_stream_card", "timeline_update_actions",
+    "layout_answer_elements", "build_stream_card", "timeline_update_actions", "footer_update_actions",
 ]

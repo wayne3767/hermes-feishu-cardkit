@@ -92,6 +92,15 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch):
+    """Final-update retries keep their count but not their real-time backoff."""
+    monkeypatch.setattr(fs, "FINAL_UPDATE_RETRY_DELAYS", (0.0, 0.0))
+
+
+FULL_UPDATE_ATTEMPTS = 1 + 2  # first try + FINAL_UPDATE_RETRY_DELAYS
+
+
 def _sealed_for(adapter: FeishuAdapter, chat_id: str):
     """The most recently sealed card for a chat, or None."""
     cards = [c for c in adapter._completed_cards.values() if c.turn.chat_id == chat_id]
@@ -390,37 +399,80 @@ class TestFallbackContract:
         assert _run(adapter.send_stream_frame("final", finalize=True, chat_id=CHAT, turn_id="t1")) is True
         assert _elements(fake.card_of(fake.named("update")[0]))[cl.ANSWER_ELEMENT_ID]["content"] == "final"
 
-    def test_full_update_rejected_falls_back_to_settings_close(self):
+    def test_full_update_rejected_once_is_retried(self):
         adapter, fake = _adapter()
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
-        fake.scripts["update"] = [_fail(230099)]
+        fake.scripts["update"] = [_fail(230020, "rate limited")]
+        assert _run(adapter.send_stream_frame("final", finalize=True, chat_id=CHAT, turn_id="t1")) is True
+        updates = fake.named("update")
+        assert len(updates) == 2 and updates[1].request_body.sequence > updates[0].request_body.sequence
+        assert fake.card_of(updates[1])["header"]["template"] == "green"
+        assert not fake.named("settings"), "the retried full update closes streaming mode itself"
+        assert _sealed_for(adapter, CHAT) is not None
+
+    def test_full_update_keeps_failing_then_slim_card_seals(self):
+        adapter, fake = _adapter()
+        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        _run(adapter.send_stream_frame(SEP + "🔍 Searching▌", chat_id=CHAT, turn_id="t1"))
+        fake.scripts["update"] = [_fail(300301, "invalid card")] * FULL_UPDATE_ATTEMPTS
+        final = "表1：参数\n| a |\n|---|\n| 1 |"
+        assert _run(adapter.send_stream_frame(final, finalize=True, chat_id=CHAT, turn_id="t1")) is True
+        updates = fake.named("update")
+        assert len(updates) == FULL_UPDATE_ATTEMPTS + 1
+        slim = fake.card_of(updates[-1])
+        assert slim["header"]["template"] == "green" and slim["header"]["subtitle"]["content"] == "已完成"
+        els = _elements(slim)
+        assert els[cl.ANSWER_ELEMENT_ID]["content"] == final, "one plain element, no table layout"
+        assert f"{cl.ANSWER_ELEMENT_ID}_1" not in els
+        assert els[cl.FOOTER_ELEMENT_ID]["content"].startswith("✅ 已完成")
+        assert not fake.named("settings")
+
+    def test_full_update_rejected_everywhere_still_clears_generating_footer(self):
+        adapter, fake = _adapter()
+        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        fake.scripts["update"] = [_fail(230099)] * (FULL_UPDATE_ATTEMPTS + 1)
         assert _run(adapter.send_stream_frame("final", finalize=True, chat_id=CHAT, turn_id="t1")) is True  # content push landed
+        batch = fake.named("batch")[-1]
+        (action,) = json.loads(batch.request_body.actions)
+        assert action["params"]["element_id"] == cl.FOOTER_ELEMENT_ID
+        assert action["params"]["partial_element"]["content"].startswith("✅ 已完成")
         assert len(fake.named("settings")) == 1
+        names = [n for n, _ in fake.calls]
+        assert names.index("settings") > names.index("batch"), "footer first, then streaming off"
 
     def test_final_that_cannot_land_returns_false_and_seals(self):
         adapter, fake = _adapter()
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
         fake.scripts["content"] = [_fail(230099)]
-        fake.scripts["update"] = [_fail(230099)]
+        fake.scripts["update"] = [_fail(230099)] * (FULL_UPDATE_ATTEMPTS + 1)
         assert _run(adapter.send_stream_frame("final", finalize=True, chat_id=CHAT, turn_id="t1")) is False
         assert len(fake.named("settings")) == 1
         assert f"{CHAT}:t1" not in adapter._stream_cards
 
-    def test_stale_turn_skips_streaming_push_and_repairs_on_finalize(self):
+    def test_stale_turn_switches_to_full_updates_and_seals_on_finalize(self):
         adapter, fake = _adapter()
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
         adapter._stream_cards[f"{CHAT}:t1"].started_at -= fs.STREAMING_TTL_SECONDS + 1
         assert _run(adapter.send_stream_frame("late", chat_id=CHAT, turn_id="t1")) is True
-        assert not fake.named("content")
+        assert not fake.named("content"), "no typewriter push past the streaming window"
+        (running,) = [fake.card_of(u) for u in fake.named("update")]
+        assert running["header"]["template"] == "blue" and running["config"]["streaming_mode"] is False
+        assert "streaming_config" not in running["config"]
+        assert _elements(running)[cl.ANSWER_ELEMENT_ID]["content"] == "late"
+        assert _run(adapter.send_stream_frame("late", chat_id=CHAT, turn_id="t1")) is True
+        assert len(fake.named("update")) == 1, "unchanged frame costs no update"
         assert _run(adapter.send_stream_frame("late final", finalize=True, chat_id=CHAT, turn_id="t1")) is True
-        assert not fake.named("content") and len(fake.named("update")) == 1
+        assert not fake.named("content") and len(fake.named("update")) == 2
+        assert fake.card_of(fake.named("update")[-1])["header"]["template"] == "green"
 
     def test_oversized_final_hands_delivery_back_to_consumer(self):
         adapter, fake = _adapter()
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
         big = "字" * (cl.CARD_MAX_BYTES // 3 + 100)  # 3 bytes per char → over the byte cap
         assert _run(adapter.send_stream_frame(big, chat_id=CHAT, turn_id="t1")) is True
-        assert not fake.named("content"), "oversized intermediate is not pushed"
+        (tail,) = fake.pushes(cl.ANSWER_ELEMENT_ID)
+        assert tail.startswith(cl.ZH.clipped_head), "oversized intermediate shows its newest part under a note"
+        assert len(tail.encode("utf-8")) <= cl.CARD_MAX_BYTES
         assert _run(adapter.send_stream_frame(big, finalize=True, chat_id=CHAT, turn_id="t1")) is False
         head = _elements(fake.card_of(fake.named("update")[0]))[cl.ANSWER_ELEMENT_ID]["content"]
         assert head.endswith("…") and len(head.encode("utf-8")) <= cl.CARD_MAX_BYTES
@@ -810,9 +862,14 @@ class TestRobustness:
     """Abandoned turns, concurrent turns and cross-chat deliveries."""
 
     def test_abandoned_turn_is_sealed_as_stopped_by_the_watchdog(self, monkeypatch):
-        monkeypatch.setattr(fs, "STREAMING_TTL_SECONDS", 0.05)
-        monkeypatch.setattr(fs, "_ABANDON_GRACE_SECONDS", 0.0)
+        monkeypatch.setattr(fs, "IDLE_SEAL_SECONDS", 0.05)
+        monkeypatch.setattr(fs, "_WATCHDOG_POLL_SECONDS", 0.02)
         adapter, fake = _adapter()
+
+        async def _blocking(func, *args):  # a real executor hop: the seal must survive its awaits
+            await asyncio.sleep(0)
+            return func(*args)
+        adapter._run_blocking = _blocking  # type: ignore[method-assign]
 
         async def _scenario():
             await adapter.send_stream_frame("partial▌", chat_id=CHAT, turn_id="t1")  # never finalized
@@ -906,3 +963,265 @@ class TestLocale:
     def test_env_locale_override(self, monkeypatch):
         monkeypatch.setenv("FEISHU_CARD_LOCALE", "en")
         assert FeishuAdapter(PlatformConfig())._card_locale == "en"
+
+
+# --- reliability: long turns, interrupts, card size, cooldown -----------------------------------
+
+class TestIdleWatchdog:
+    """The watchdog seals only silent turns; an idle-sealed turn that speaks again gets its card back."""
+
+    @staticmethod
+    def _fast(monkeypatch, idle: float = 0.15, stop: float = 0.03) -> None:
+        monkeypatch.setattr(fs, "IDLE_SEAL_SECONDS", idle)
+        monkeypatch.setattr(fs, "STOP_IDLE_SECONDS", stop)
+        monkeypatch.setattr(fs, "_WATCHDOG_POLL_SECONDS", 0.01)
+
+    def test_active_turn_outlives_the_idle_window(self, monkeypatch):
+        self._fast(monkeypatch)
+        adapter, fake = _adapter()
+
+        async def _scenario():
+            await adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1")
+            for i in range(8):  # 8 × 0.06 s ≫ the 0.15 s idle window, but never silent that long
+                await asyncio.sleep(0.06)
+                await adapter.send_stream_frame("x" * (i + 1) + "▌", chat_id=CHAT, turn_id="t1")
+            alive = f"{CHAT}:t1" in adapter._stream_cards
+            await asyncio.sleep(0.3)
+            return alive
+
+        assert _run(_scenario()) is True
+        assert f"{CHAT}:t1" not in adapter._stream_cards, "sealed once it fell silent"
+        (update,) = fake.named("update")
+        assert fake.card_of(update)["header"]["template"] == "grey"
+
+    def test_idle_sealed_turn_is_revived_in_the_same_card(self, monkeypatch):
+        self._fast(monkeypatch)
+        adapter, fake = _adapter()
+
+        async def _scenario():
+            await adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1")
+            await adapter.send_stream_frame("思考中", chat_id=CHAT, turn_id="t1")
+            await asyncio.sleep(0.3)  # a long silent tool call: sealed as stopped
+            assert f"{CHAT}:t1" not in adapter._stream_cards
+            await adapter.send_stream_frame("思考中" + SEP + "💻 terminal▌", chat_id=CHAT, turn_id="t1")
+            return await adapter.send_stream_frame("思考中，结论如下。", finalize=True, chat_id=CHAT, turn_id="t1")
+
+        assert _run(_scenario()) is True
+        assert len(fake.named("create")) == 1, "no second card"
+        stopped, revived, done = [fake.card_of(u) for u in fake.named("update")]
+        assert stopped["header"]["template"] == "grey"
+        assert revived["header"]["template"] == "blue" and revived["config"]["streaming_mode"] is False
+        assert _elements(revived)[cl.TIMELINE_ELEMENT_ID]["content"] == "💻 terminal"
+        assert done["header"]["template"] == "green"
+        assert _elements(done)[cl.ANSWER_ELEMENT_ID]["content"] == "思考中，结论如下。"
+        assert len(fake.named("content")) == 1, "streaming mode is off after the seal: full updates only"
+        assert adapter._stream_cards == {} and adapter._idle_sealed == {}
+
+    def test_finalize_after_idle_seal_lands_in_the_card(self, monkeypatch):
+        self._fast(monkeypatch)
+        adapter, fake = _adapter()
+
+        async def _scenario():
+            await adapter.send_stream_frame("部分", chat_id=CHAT, turn_id="t1")
+            await asyncio.sleep(0.3)
+            return await adapter.send_stream_frame("部分回答完整。", finalize=True, chat_id=CHAT, turn_id="t1")
+
+        assert _run(_scenario()) is True
+        assert fake.card_of(fake.named("update")[-1])["header"]["template"] == "green"
+
+    def test_turn_without_turn_id_is_not_revived(self, monkeypatch):
+        self._fast(monkeypatch)
+        adapter, fake = _adapter()
+        fake.scripts["create"] = [_ok(card_id="card_1"), _ok(card_id="card_2")]
+
+        async def _scenario():
+            await adapter.send_stream_frame("旧", chat_id=CHAT)  # key "<chat>:default" is reused by every turn
+            await asyncio.sleep(0.3)
+            await adapter.send_stream_frame("新", chat_id=CHAT)
+
+        _run(_scenario())
+        assert [fake.card_of(c)["body"]["elements"][0]["content"] for c in fake.named("create")] == ["旧", "新"]
+
+    def test_interrupt_seals_the_chats_cards_quickly(self, monkeypatch):
+        self._fast(monkeypatch, idle=30.0)
+        adapter, fake = _adapter()
+        fake.scripts["create"] = [_ok(card_id="card_1"), _ok(card_id="card_2")]
+
+        async def _scenario():
+            await adapter.send_stream_frame("回答到一半", chat_id=CHAT, turn_id="t1")
+            await adapter.send_stream_frame("另一个聊天", chat_id="oc_other", turn_id="t2")
+            await adapter.interrupt_session_activity("agent:main:feishu:dm:x", CHAT, metadata=None)
+            await asyncio.sleep(0.2)
+
+        _run(_scenario())
+        assert f"{CHAT}:t1" not in adapter._stream_cards
+        assert "oc_other:t2" in adapter._stream_cards, "other chats are untouched"
+        (update,) = fake.named("update")
+        card = fake.card_of(update)
+        assert update.card_id == "card_1" and card["header"]["subtitle"]["content"] == "已停止"
+        assert _answer_text(card) == "回答到一半"
+
+    def test_interrupt_respects_thread_metadata(self, monkeypatch):
+        self._fast(monkeypatch, idle=30.0)
+        adapter, fake = _adapter()
+        adapter.remember_thread_for_message("om_user", "omt_a")
+
+        async def _scenario():
+            await adapter.send_stream_frame("话题A", chat_id=CHAT, reply_to="om_user", turn_id="t1")
+            await adapter.interrupt_session_activity("k", CHAT, metadata={"thread_id": "omt_b"})
+            await asyncio.sleep(0.1)
+
+        _run(_scenario())
+        assert f"{CHAT}:t1" in adapter._stream_cards and not fake.named("update")
+
+    def test_interrupt_still_runs_the_base_behaviour(self):
+        adapter, _ = _adapter()
+        calls = []
+
+        async def _base(self, session_key, chat_id, metadata=None):
+            calls.append((session_key, chat_id, metadata))
+        with patch("gateway.platforms.base.BasePlatformAdapter.interrupt_session_activity", _base):
+            _run(adapter.interrupt_session_activity("k", CHAT, metadata={"thread_id": None}))
+        assert calls == [("k", CHAT, {"thread_id": None})]
+
+
+class TestCardSize:
+    """The whole serialized card stays under Feishu's limit: timeline first, then the answer."""
+
+    def test_clip_helpers_cut_at_paragraphs_and_balance_fences(self):
+        text = "第一段。\n\n```python\n" + "x = 1\n" * 400 + "```\n\n末段。"
+        head = cl.clip_markdown_head(text, 600, "…")
+        assert cl.utf8_len(head) <= 600 and head.endswith("```\n\n…") and head.startswith("第一段。")
+        tail = cl.clip_markdown_tail(text, 600, "（略）")
+        assert cl.utf8_len(tail) <= 600 and tail.startswith("（略）\n\n```\n") and tail.endswith("末段。")
+        math = "开头\n\n$$\n" + "a+b\n" * 300 + "$$\n\n结尾"
+        assert cl.clip_markdown_head(math, 400, "…").endswith("$$\n\n…")
+        assert cl.clip_markdown_head("short", 100, "…") == "short"
+
+    def test_render_timeline_budgets(self):
+        lines = [f"🔧 tool {i}" for i in range(20)]
+        assert cl.render_timeline(lines, max_lines=0) == "… 已省略 20 行"
+        slim = cl.render_timeline(lines, max_lines=3, max_bytes=10_000)
+        assert slim.splitlines() == ["… 已省略 17 行", "🔧 tool 17", "🔧 tool 18", "🔧 tool 19"]
+
+    def test_timeline_gives_way_before_the_answer(self):
+        adapter, fake = _adapter()
+        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        turn = adapter._stream_cards[f"{CHAT}:t1"]
+        turn.timeline = [f"💻 terminal {i} " + "参" * 45 for i in range(40)]  # ~6 KB of tool lines
+        final = "\n\n".join(["结论" * 60] * 60)  # ~21.8 KB: under CARD_MAX_BYTES, but not with the timeline
+        assert _run(adapter.send_stream_frame(final, finalize=True, chat_id=CHAT, turn_id="t1")) is True
+        update = fake.named("update")[-1]
+        assert cl.utf8_len(update.request_body.card.data) <= cl.CARD_JSON_MAX_BYTES
+        els = _elements(fake.card_of(update))
+        assert els[cl.ANSWER_ELEMENT_ID]["content"] == final, "answer intact"
+        assert els[cl.TIMELINE_ELEMENT_ID]["content"].startswith("… 已省略")
+        assert els[cl.TIMELINE_PANEL_ID]["header"]["title"]["content"] == "思考与工具 · 40 次工具调用"
+
+    def test_escaping_heavy_answer_is_clipped_and_handed_back(self):
+        adapter, fake = _adapter()
+        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        para = '"\\' * 100  # 200 bytes raw, ~400 bytes once JSON-escaped
+        final = "\n\n".join([para] * 110)  # ~22 KB raw → ~44 KB escaped
+        assert cl.utf8_len(final) <= cl.CARD_MAX_BYTES
+        assert _run(adapter.send_stream_frame(final, finalize=True, chat_id=CHAT, turn_id="t1")) is False
+        update = fake.named("update")[-1]
+        assert cl.utf8_len(update.request_body.card.data) <= cl.CARD_JSON_MAX_BYTES
+        shown = _answer_text(fake.card_of(update))
+        assert shown.endswith("\n\n…") and shown[:-3].rstrip().endswith(para), "cut at a paragraph boundary"
+        assert _sealed_for(adapter, CHAT) is None, "a clipped card takes no attachments"
+
+    def test_running_answer_view_fits_the_card(self):
+        adapter, fake = _adapter()
+        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        big = "\n\n".join(f"第{i}段" + "文" * 300 for i in range(40))  # ~36 KB
+        assert _run(adapter.send_stream_frame(big + "▌", chat_id=CHAT, turn_id="t1")) is True
+        (view,) = fake.pushes(cl.ANSWER_ELEMENT_ID)
+        assert view.startswith(cl.ZH.clipped_head + "\n\n第") and view.endswith("▌")
+        turn = adapter._stream_cards[f"{CHAT}:t1"]
+        card = adapter._card(turn, cl.PHASE_RUNNING, view)
+        assert cl.card_json_bytes(card) <= cl.CARD_JSON_MAX_BYTES
+        assert turn.answer_clipped and turn.answer == big + "▌"
+
+
+class TestOpenCooldown:
+    def test_transient_failures_pause_then_retry_after_cooldown(self):
+        adapter, fake = _adapter()
+        fake.scripts["create"] = [RuntimeError("net")] * (fs.MAX_OPEN_FAILURES + 1) + [_ok(card_id=CARD_ID)]
+        with patch.object(FeishuAdapter, "_cardkit_available", staticmethod(lambda: True)):
+            for i in range(fs.MAX_OPEN_FAILURES):
+                _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id=f"t{i}"))
+            assert adapter.supports_native_streaming() is False
+            assert adapter._stream_card_retry_at is not None
+            adapter._stream_card_retry_at = time.monotonic() - 1  # cooldown over
+            assert adapter.supports_native_streaming() is True
+            assert _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="trial")) is False
+            assert adapter.supports_native_streaming() is False, "a failed trial pauses again at once"
+            adapter._stream_card_retry_at = time.monotonic() - 1
+            assert adapter.supports_native_streaming() is True
+            assert _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="ok")) is True
+            assert adapter._stream_card_open_failures == 0
+
+    def test_permission_error_never_cools_down(self):
+        adapter, fake = _adapter()
+        fake.scripts["create"] = [_fail(fs.NO_PERMISSION_CODE, "no permission")]
+        with patch.object(FeishuAdapter, "_cardkit_available", staticmethod(lambda: True)):
+            _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+            assert adapter._stream_card_retry_at is None
+            with patch.object(fs.time, "monotonic", lambda: 10 ** 9):
+                assert adapter.supports_native_streaming() is False
+
+
+class TestFailureLogging:
+    def test_rejected_seal_is_a_warning_with_code_but_no_content(self, caplog):
+        adapter, fake = _adapter()
+        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        fake.scripts["update"] = [_fail(230099, "card is invalid")] + [_ok()]
+        with caplog.at_level("WARNING", logger="hermes_feishu_cardkit"):
+            _run(adapter.send_stream_frame("秘密内容", finalize=True, chat_id=CHAT, turn_id="t1"))
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("full update" in m and "code=230099" in m for m in warnings)
+        assert not any("秘密内容" in m for m in warnings)
+
+    def test_intermediate_push_failures_stay_quiet(self, caplog):
+        adapter, fake = _adapter()
+        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        fake.scripts["content"] = [_fail(230099)]
+        with caplog.at_level("WARNING", logger="hermes_feishu_cardkit"):
+            _run(adapter.send_stream_frame("partial", chat_id=CHAT, turn_id="t1"))
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+class TestAttachmentMatching:
+    """Without a raw response naming the card, only a lone, just-sealed card takes the images."""
+
+    @staticmethod
+    def _send(adapter, tmp_path):
+        f = tmp_path / "a.png"; f.write_bytes(b"png")
+        sent = []
+
+        async def _send_image_file(**kw):
+            sent.append(kw["image_path"]); return SimpleNamespace(success=True)
+        with patch.object(FeishuAdapter, "send_image_file", side_effect=_send_image_file):
+            _run(adapter.send_multiple_images(CHAT, [(f"file://{f}", "")]))
+        return sent
+
+    def test_two_candidate_cards_send_images_as_messages(self, tmp_path):
+        adapter, fake = _adapter()
+        fake.im.v1.image = SimpleNamespace(create=fake._m("image"))
+        fake.scripts["image"] = [_ok(image_key="img_x")]
+        fake.scripts["create"] = [_ok(card_id="card_1"), _ok(card_id="card_2")]
+        for turn in ("a", "b"):
+            _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id=turn))
+            _run(adapter.send_stream_frame(f"回答 {turn}", finalize=True, chat_id=CHAT, turn_id=turn))
+        assert len(self._send(adapter, tmp_path)) == 1
+        assert len(fake.named("update")) == 2, "neither card was guessed"
+
+    def test_lone_card_sealed_a_while_ago_is_not_guessed(self, tmp_path):
+        adapter, fake = _adapter()
+        fake.im.v1.image = SimpleNamespace(create=fake._m("image"))
+        fake.scripts["image"] = [_ok(image_key="img_x")]
+        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        _run(adapter.send_stream_frame("回答", finalize=True, chat_id=CHAT, turn_id="t1"))
+        _sealed_for(adapter, CHAT).sealed_at -= fs.UNMATCHED_ATTACH_WINDOW_SECONDS + 1
+        assert len(self._send(adapter, tmp_path)) == 1 and len(fake.named("update")) == 1
