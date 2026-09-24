@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("hermes_feishu_cardkit")
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Registry metadata mirrored from the bundled entry (plain values; the callables are proxied lazily).
 _STATIC_ENTRY = dict(

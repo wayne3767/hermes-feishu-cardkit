@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.1 — 2026-09-24
+
+Reliability fixes for long turns and failed card updates (no layout changes).
+
+- Final seal no longer leaves a card "生成中": the completed-layout `card.update` is retried
+  (1 s, 3 s), then a slim card (one plain answer element, tool lines reduced to their count) is
+  tried, and as a last resort the footer is rewritten and streaming mode switched off.
+- Long turns: the abandon watchdog is idle-based (no frame for 5 min) instead of a fixed 10 min
+  after the card opened, so active turns are never sealed "已停止" mid-run; past CardKit's
+  10-minute streaming window frames go out as full updates of the same card instead of being
+  dropped.  A frame for an idle-sealed turn revives the same card rather than opening a second one.
+- `/stop` and `/new`: `interrupt_session_activity` marks the chat's open cards, which are sealed
+  "已停止" once silent for 5 s (the consumer sends no final frame for a cancelled native stream).
+- Card size: the whole serialized card is measured against a 28 000-byte budget; the tool
+  timeline shrinks first, then the answer is cut at a paragraph boundary with open code fences /
+  `$$` blocks closed.  An answer that outgrows the card mid-stream shows its newest paragraphs
+  under a note instead of freezing.
+- Card-open failures: three non-permission failures in a row pause streaming cards for 10 min
+  (then one trial open) instead of disabling them until restart; missing `cardkit:card:write`
+  (99991672) still disables them.
+- Full-update, footer and close failures are logged at WARNING with the Feishu error code (no
+  content); intermediate frame failures stay at DEBUG.
+- Post-stream images whose response matches no card only go into the chat's single card sealed
+  within 10 s; otherwise they are sent as ordinary messages rather than guessed into a card.
+- The watchdog no longer cancels itself before its seal completes.
+
 ## 0.1.0 — 2026-09-06
 
 First release: CardKit streaming card per turn (typewriter answer, status header, collapsed tool

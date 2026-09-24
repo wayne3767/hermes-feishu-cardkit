@@ -62,7 +62,9 @@ The card can embed figures and caption them, but whether the model draws anythin
 
 - Feishu card tables render at most 5 data rows and 4 tables per element; longer tables are cut by the platform.
 - Matrices, `cases`, multi-line alignment environments and formulas containing CJK text are not typeset as images; they fall back to Unicode.
-- Card JSON is capped at 30 KB; an oversized answer shows its head in the card and the rest goes out as ordinary messages.
+- Card JSON is capped at 30 KB; the whole card is measured, tool lines give way first, and an oversized answer shows its head in the card while the full text goes out as ordinary messages. While streaming, an oversized answer shows its newest paragraphs.
+- CardKit ends streaming mode after 10 minutes; longer turns keep updating the same card with full updates (no typewriter effect).
+- `/stop` and `/new` mark the chat's open card "Stopped" within a few seconds; a turn that sends nothing for 5 minutes is marked "Stopped" too and returns to "Generating" if it resumes.
 - Hermes does not expose the model's reasoning or token usage to adapters, so the card has neither.
 
 ### Development
@@ -131,7 +133,9 @@ hermes gateway restart
 
 - 飞书卡片 Markdown 表格最多 5 行数据、每个元素最多 4 个表格，超出会被飞书截断。
 - 矩阵、分段函数、多行对齐环境和含中文的公式不做图片排版，退回 Unicode 文本。
-- 卡片 JSON 上限 30 KB；超长回答的卡片显示开头部分，其余由 Hermes 按普通消息发出。
+- 卡片 JSON 上限 30 KB；按整张卡片计量，先压缩工具时间线；仍超长的回答在卡片里显示开头部分，完整内容由 Hermes 按普通消息发出。生成过程中超长时显示最新几段。
+- CardKit 流式模式 10 分钟后自动关闭；更长的回合继续用整卡更新刷新同一张卡片（没有打字机效果）。
+- `/stop`、`/new` 后几秒内卡片标为"已停止"；回合 5 分钟没有任何输出也会标为"已停止"，恢复输出后自动回到"生成中"。
 - 模型的思考过程和 token 用量 Hermes 不暴露给适配器，卡片里没有这两项。
 
 ### 开发与测试
