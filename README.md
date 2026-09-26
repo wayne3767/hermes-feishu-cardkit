@@ -56,7 +56,7 @@ Streaming as a whole is governed by Hermes's general `streaming.enabled` setting
 
 ### Letting the model produce figures and table titles
 
-The card can embed figures and caption them, but whether the model draws anything is up to your prompt. These are Feishu-only conventions, so put them in the Feishu platform hint rather than `SOUL.md` (other channels would follow them too) — in the profile's `config.yaml`, `agent.platform_hints.feishu.append: |` followed by rules like:
+The card can embed figures and caption them, but whether the model draws anything is up to your prompt. These are Feishu-only conventions, so put them in the Feishu platform hint rather than `SOUL.md` (other channels would follow them too) — a top-level `platform_hints:` → `feishu:` → `append: |` block in the profile's `config.yaml`, with rules like:
 
 ```
 - When explaining distributions, curves or geometry, showing data trends or comparisons, or describing how a system works, draw a figure with Python matplotlib.
@@ -136,7 +136,7 @@ hermes gateway restart
 
 ### 让模型配图和写表题
 
-卡片能嵌图、写图注和表题，但图从哪来由模型决定。这些是飞书专用约定，建议写进飞书平台提示而不是 `SOUL.md`（否则其他渠道也会照做）：在 profile 的 `config.yaml` 里写 `agent.platform_hints.feishu.append: |`，后接类似下面的规则：
+卡片能嵌图、写图注和表题，但图从哪来由模型决定。这些是飞书专用约定，建议写进飞书平台提示而不是 `SOUL.md`（否则其他渠道也会照做）：在 profile 的 `config.yaml` 顶层写 `platform_hints:` → `feishu:` → `append: |`，后接类似下面的规则：
 
 ```
 - 解释概率分布、函数曲线、几何关系，或给出数据趋势、对比、分布，或说明设备与系统原理时，用 Python matplotlib 画图。
