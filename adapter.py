@@ -16,11 +16,14 @@ import importlib
 import json
 import logging
 import os
-import time
+import uuid
+from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from plugins.platforms.feishu import adapter as _bundled
 
+from .card_layout import STOP_ACTION
 from .cron_card import DEFAULT_TEMPLATE, TEMPLATES, build_cron_card
 from .streaming import FeishuStreamingCardMixin
 
@@ -32,6 +35,8 @@ REQUIRED_BASE_ATTRS = (
     "_client", "_run_blocking", "_feishu_send_with_retry", "_finalize_send_result", "_response_succeeded",
     "_extract_response_field", "_handle_message_event_data", "disconnect",
 )
+# Seams the stop button needs on top of those; without them the button is simply not shown.
+STOP_BUTTON_ATTRS = ("_on_card_action_trigger", "_loop_accepts_callbacks", "_submit_on_loop", "_dispatch_synthetic_event")
 _CARDKIT_MODULE = "lark_oapi.api.cardkit.v1"
 
 
@@ -56,6 +61,15 @@ def _setting(extra: dict, key: str, env: str, default: str) -> Any:
     except Exception:
         value = os.getenv(env, default)
     return value if value not in (None, "") else default
+
+
+def _now() -> datetime:
+    """Hermes's configured timezone (``timezone`` in config.yaml), not the server clock's zone."""
+    try:
+        from hermes_time import now
+        return now()
+    except Exception:
+        return datetime.now().astimezone()
 
 
 def _cardkit():
@@ -85,6 +99,47 @@ class CardkitFeishuAdapter(FeishuStreamingCardMixin, _bundled.FeishuAdapter):
             logger.warning("[Feishu] unknown cron card template %r; using %s", template, DEFAULT_TEMPLATE)
             template = DEFAULT_TEMPLATE
         self._cron_card_template = template
+        self._stop_button = (_truthy(_setting(extra, "card_stop_button", "FEISHU_CARD_STOP_BUTTON", "true"))
+                             and all(hasattr(_bundled.FeishuAdapter, name) for name in STOP_BUTTON_ATTRS))
+
+    # --- Stop button -------------------------------------------------------------------------------
+
+    def _on_card_action_trigger(self, data: Any) -> Any:
+        """A click on a generating card's stop button becomes "/stop" from the clicker, through the
+        same guarded pipeline as a typed command (so the usual authorization applies and the stop
+        reaches the clicker's own session).  Every other click goes to the bundled handler."""
+        event = getattr(data, "event", None)
+        value = getattr(getattr(event, "action", None), "value", None) or {}
+        if not (isinstance(value, dict) and value.get("hermes_cardkit") == STOP_ACTION["hermes_cardkit"]):
+            return super()._on_card_action_trigger(data)
+        context, operator = getattr(event, "context", None), getattr(event, "operator", None)
+        chat_id = str(getattr(context, "open_chat_id", "") or "")
+        open_id = str(getattr(operator, "open_id", "") or "")
+        token = str(getattr(event, "token", "") or "")
+        duplicate = getattr(self, "_is_card_action_duplicate", None)
+        if token and callable(duplicate) and duplicate(token):
+            return self._toast("info", self._labels.stop_toast)
+        loop = getattr(self, "_loop", None)
+        if not chat_id or not open_id or not self._loop_accepts_callbacks(loop):
+            logger.warning("[Feishu] stop button click dropped (chat=%r, operator present=%s)", chat_id, bool(open_id))
+            return self._toast("error", self._labels.stop_failed)
+        from gateway.platforms.base import MessageType
+        logger.info("[Feishu] stop button clicked by %s in %s; dispatching /stop", open_id, chat_id)
+        self._submit_on_loop(loop, self._dispatch_synthetic_event(
+            text="/stop", message_type=MessageType.COMMAND, chat_id=chat_id,
+            sender_id=SimpleNamespace(open_id=open_id, user_id=None, union_id=None), event_chat_type="group",
+            raw_message=data, message_id=token or str(uuid.uuid4()),
+        ))
+        return self._toast("info", self._labels.stop_toast)
+
+    @staticmethod
+    def _toast(kind: str, content: str) -> Any:
+        """Card-callback response carrying only a toast (a streaming card cannot be updated inline)."""
+        try:
+            from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+        except Exception:
+            return None
+        return P2CardActionTriggerResponse({"toast": {"type": kind, "content": content}})
 
     # --- Cron deliveries as cards ------------------------------------------------------------------
 
@@ -93,7 +148,7 @@ class CardkitFeishuAdapter(FeishuStreamingCardMixin, _bundled.FeishuAdapter):
         """Cron deliveries (Hermes marks them with ``metadata["job_id"]``) go out as one static card;
         everything else, and any card Feishu rejects, takes the bundled path unchanged."""
         if self._cron_card and self._client is not None and "job_id" in (metadata or {}):
-            card = build_cron_card(content, labels=self._labels, sent_at=time.strftime("%m-%d %H:%M"),
+            card = build_cron_card(content, labels=self._labels, sent_at=_now().strftime("%m-%d %H:%M"),
                                    template=self._cron_card_template)
             if card is not None:
                 try:

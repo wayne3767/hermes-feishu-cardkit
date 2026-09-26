@@ -58,7 +58,7 @@ from .card_layout import (
     render_timeline, summary_for, timeline_update_actions, utf8_len,
 )
 from .math_image import formula_digest, mathtext_available, render_formula_png
-from .math_text import convert_math, iter_block_formulas
+from .math_text import convert_math, hide_open_formula, iter_block_formulas
 
 logger = logging.getLogger("hermes_feishu_cardkit")
 
@@ -531,7 +531,7 @@ class FeishuStreamingCardMixin:
             # Finish the typewriter before the layout switch; the full update below carries the
             # same text, so a rejected push is repaired there.  An answer too big for the running
             # card is left to the completed layout (which clips it and hands delivery back).
-            view, clipped = self._answer_view(turn, final)
+            view, clipped = self._answer_view(turn, final, hold_open_math=False)
             if not clipped:
                 landed = await self._push_element(turn, ANSWER_ELEMENT_ID, view)
         await self._await_formula_images(turn, final)
@@ -671,6 +671,7 @@ class FeishuStreamingCardMixin:
             timeline_md=render_timeline(turn.timeline, labels, max_lines=timeline_lines, max_bytes=timeline_bytes),
             tool_count=turn.tool_count, footer=self._footer(turn, phase), phase=phase,
             summary=summary_for(markdown, phase, labels), labels=labels, streaming=streaming, plain=plain,
+            stop_button=bool(getattr(self, "_stop_button", False)),
         )
 
     def _fit_card(self, turn: StreamCardTurn, phase: str, markdown: str, *, streaming: Optional[bool] = None,
@@ -697,10 +698,15 @@ class FeishuStreamingCardMixin:
                     turn.card_id, utf8_len(markdown))
         return card, True
 
-    def _answer_view(self, turn: StreamCardTurn, answer: str, *, streaming: bool = True) -> Tuple[str, bool]:
+    def _answer_view(self, turn: StreamCardTurn, answer: str, *, streaming: bool = True,
+                     hold_open_math: bool = True) -> Tuple[str, bool]:
         """What the running card's answer element shows, and whether it is clipped: the answer, or
         once it outgrows the card its newest paragraphs under a "earlier text omitted" note (the
-        completed layout or the consumer's fallback delivers the whole text)."""
+        completed layout or the consumer's fallback delivers the whole text).  A formula still
+        being typed at the end is held back (``hold_open_math``) until it closes."""
+        if hold_open_math:
+            body = answer.rstrip(_CURSOR_CHARS)
+            answer = hide_open_formula(body) + answer[len(body):]
         rendered = render_answer(answer)
         skeleton = card_json_bytes(self._card(turn, PHASE_RUNNING, "", streaming=streaming))
         budget = min(CARD_MAX_BYTES, CARD_JSON_MAX_BYTES - skeleton - _TIMELINE_GROWTH_RESERVE)

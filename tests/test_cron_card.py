@@ -161,6 +161,15 @@ class TestAdapterSend:
         adapter = CardkitFeishuAdapter(PlatformConfig(enabled=True, extra={"cron_card_template": "Gold"}))
         assert adapter._cron_card_template == "violet"
 
+    def test_footer_time_uses_hermes_timezone(self, monkeypatch):
+        from datetime import datetime, timezone, timedelta
+        import hermes_time
+        monkeypatch.setattr(hermes_time, "now", lambda: datetime(2026, 1, 2, 6, 0, tzinfo=timezone(timedelta(hours=8))))
+        adapter, fake = _adapter()
+        _run(adapter.send(CHAT, REPORT, metadata={"job_id": "job1"}))
+        footer = json.loads(self._sent(fake)[0][1])["body"]["elements"][-1]["content"]
+        assert footer.endswith("01-02 06:00")
+
     def test_disabled_by_setting(self):
         adapter, fake = _adapter()
         adapter._cron_card = False

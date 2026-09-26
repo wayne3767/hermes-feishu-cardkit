@@ -16,7 +16,9 @@ Out of the box, Hermes delivers a Feishu/Lark reply as a plain message that gets
 - A status header (Generating / Done / Stopped) and a footer with elapsed time, model and tool-call count.
 - Tool calls fold into a collapsed **"Thinking & tools · N tool calls"** panel instead of a stream of progress messages.
 - Inline LaTeX becomes Unicode math text (`\delta_p` → δₚ, `\frac{a}{b}` → (a)/(b)); display formulas are typeset into images when `matplotlib` is available.
-- Images the model attaches (`MEDIA:` lines) are placed inside the card where the model put them, with centred **"Figure N · title"** captions; markdown tables get a **"Table N · title"** heading.
+- Images the model attaches (`MEDIA:` lines) are placed inside the card where the model put them, with centred **"Figure N · title"** captions; markdown tables get a **"Table N · title"** heading, and tables longer than 5 rows become paged table components (10 rows per page) once the answer is done.
+- A **Stop** button on the generating card sends `/stop` for whoever clicks it.
+- Inline LaTeX still being typed is held back until it closes, so raw `$\frac{…` never flashes in the card.
 - Cron deliveries (scheduled job output) go out as **one static card**: the first line becomes the header (a trailing `(…)` the subtitle), the rest keeps its headings and tables, Hermes's English "Cronjob Response" wrapper is removed and the job name goes into a scheduled-task footer; the header is violet (chat cards keep blue / green / grey for their progress) and red on failures.
 - Every step degrades to Hermes's normal delivery on failure (missing CardKit scope, upload error, oversized answer, an incompatible Hermes build). Text and images are never lost.
 
@@ -47,23 +49,27 @@ Optional: display formulas are typeset as images when the `matplotlib` package i
 | `FEISHU_CARD_LOCALE` / `platforms.feishu.card_locale` | empty | Card wording `zh` / `en`; default follows `FEISHU_DOMAIN` |
 | `FEISHU_CRON_CARD` / `platforms.feishu.cron_card` | `true` | `false` sends cron output as ordinary messages again |
 | `FEISHU_CRON_CARD_TEMPLATE` / `platforms.feishu.cron_card_template` | `violet` | Header colour of cron cards (a Feishu card template name); failures stay `red` |
+| `FEISHU_CARD_STOP_BUTTON` / `platforms.feishu.card_stop_button` | `true` | Stop button on generating cards |
 | `display.platforms.feishu.tool_progress` | Hermes default `new` | `all` records every tool call in the timeline, without merging repeats |
 
 Streaming as a whole is governed by Hermes's general `streaming.enabled` setting.
 
 ### Letting the model produce figures and table titles
 
-The card can embed figures and caption them, but whether the model draws anything is up to your prompt. Add something like this to the profile's `SOUL.md`:
+The card can embed figures and caption them, but whether the model draws anything is up to your prompt. These are Feishu-only conventions, so put them in the Feishu platform hint rather than `SOUL.md` (other channels would follow them too) — in the profile's `config.yaml`, `agent.platform_hints.feishu.append: |` followed by rules like:
 
 ```
 - When explaining distributions, curves or geometry, showing data trends or comparisons, or describing how a system works, draw a figure with Python matplotlib.
 - Name the file after the figure's title: /tmp/hermes_fig_<title>_<timestamp>.png. Put the MEDIA:/tmp/….png line where the figure belongs in the text; the card adds "Figure N · title" itself, so do not write your own caption.
-- Put a single line "Table N: title" above every markdown table; keep tables to 5 data rows (a Feishu card limit).
+- Put a single line "Table N: title" above every markdown table. Tables longer than 5 rows show paged (10 rows per page, at most 5 such tables per card).
+- Cards do not render LaTeX; the plugin converts it. Use $…$ for inline symbols (shown as Unicode text) and $$…$$ on their own lines for fractions, sums and integrals (typeset as images). Display formulas cannot contain CJK text or aligned / cases / matrix environments.
 ```
 
 ### Known limits
 
-- Feishu card tables render at most 5 data rows and 4 tables per element; longer tables are cut by the platform.
+- Feishu pages markdown tables at 5 data rows; longer tables become table components (10 rows per page) in the finished card, at most 5 per card; while generating they show as markdown.
+- The Stop button stops the clicker's own session; in topic groups it may miss a turn started inside a topic (card callbacks carry no topic).
+- Subscripts without a Unicode form are written run-on (`$A_d$` → Ad, `$V_{daf}$` → Vdaf), as plain-text coal and chemistry notation does.
 - Matrices, `cases`, multi-line alignment environments and formulas containing CJK text are not typeset as images; they fall back to Unicode.
 - Card JSON is capped at 30 KB; the whole card is measured, tool lines give way first, and an oversized answer shows its head in the card while the full text goes out as ordinary messages. While streaming, an oversized answer shows its newest paragraphs.
 - CardKit ends streaming mode after 10 minutes; longer turns keep updating the same card with full updates (no typewriter effect).
@@ -92,7 +98,9 @@ Hermes 的飞书通道默认把回复作为普通消息反复编辑。这个插�
 - 标题栏显示状态（生成中 / 已完成 / 已停止），页脚显示用时、模型、工具调用次数
 - 工具调用收进折叠面板"思考与工具 · N 次工具调用"，不刷屏
 - 行内 LaTeX 公式转成 Unicode 数学文本；块级公式在装了 matplotlib 时排版成图片
-- 模型附带的图片（`MEDIA:` 行）嵌进卡片正文对应位置，带居中的"图N 标题"图注；表格上方加"表N 标题"表题
+- 模型附带的图片（`MEDIA:` 行）嵌进卡片正文对应位置，带居中的"图N 标题"图注；表格上方加"表N 标题"表题；超过 5 行的表格在完成后改为分页表格组件（每页 10 行）
+- 生成中的卡片带"停止生成"按钮，点击即替点击者发送 `/stop`
+- 生成中尚未闭合的行内公式先不显示，不会闪出原始 LaTeX
 - 定时任务（cron）的输出以**一张静态卡片**发出：首行作标题（末尾括号内容作副标题），其余保留标题层级和表格，Hermes 默认加的英文外壳（"Cronjob Response…"）会去掉，任务名放进"定时任务"页脚；标题栏为紫色（聊天卡片的蓝 / 绿 / 灰表示进度，两者分开），标题含"失败"等字样时为红色
 - 任一环节失败都退回 Hermes 原有的投递方式，文字和图片不会丢
 
@@ -121,24 +129,28 @@ hermes gateway restart
 | `FEISHU_CARD_LOCALE` / `platforms.feishu.card_locale` | 空 | 卡片文案语言 `zh` / `en`；默认 feishu 域中文、lark 域英文 |
 | `FEISHU_CRON_CARD` / `platforms.feishu.cron_card` | `true` | 设为 `false` 时定时任务输出恢复为普通消息 |
 | `FEISHU_CRON_CARD_TEMPLATE` / `platforms.feishu.cron_card_template` | `violet` | 定时任务卡片标题栏颜色（飞书卡片模板名）；失败始终为 `red` |
+| `FEISHU_CARD_STOP_BUTTON` / `platforms.feishu.card_stop_button` | `true` | 生成中卡片的"停止生成"按钮 |
 | `display.platforms.feishu.tool_progress` | Hermes 默认 `new` | 设为 `all` 时时间线记录每一次工具调用，连续同名调用不合并 |
 
 流式本身受 Hermes 通用设置 `streaming.enabled` 控制。
 
 ### 让模型配图和写表题
 
-卡片能嵌图、写图注和表题，但图从哪来由模型决定。把下面这段放进 profile 的 `SOUL.md`，模型就会在合适的时候用 matplotlib 画图、用约定的文件名给图命名、在表格上方写表题：
+卡片能嵌图、写图注和表题，但图从哪来由模型决定。这些是飞书专用约定，建议写进飞书平台提示而不是 `SOUL.md`（否则其他渠道也会照做）：在 profile 的 `config.yaml` 里写 `agent.platform_hints.feishu.append: |`，后接类似下面的规则：
 
 ```
 - 解释概率分布、函数曲线、几何关系，或给出数据趋势、对比、分布，或说明设备与系统原理时，用 Python matplotlib 画图。
 - 脚本开头设置中文字体：plt.rcParams['font.family'] = ['Hiragino Sans GB', 'Arial Unicode MS']；plt.rcParams['axes.unicode_minus'] = False。
 - 文件名就是图的中文标题：/tmp/hermes_fig_<中文标题>_<时间戳>.png。MEDIA:/tmp/…png 单独一行，放在正文中图应出现的位置。卡片会自动加"图N 标题"，不要自己写图注。
-- 每个表格上方单独一行写"表N：标题"；表格数据不超过 5 行（飞书卡片的限制）。
+- 每个表格上方单独一行写"表N：标题"。超过 5 行的表格会分页显示（每页 10 行，一张卡片最多 5 个）。
+- 卡片不渲染 LaTeX，由插件转换：行内符号用 $…$（转成 Unicode 文本），分式、求和、积分用单独成行的 $$…$$（转成公式图片）。块级公式里不写中文，不用 aligned、cases、matrix 等环境。
 ```
 
 ### 已知限制
 
-- 飞书卡片 Markdown 表格最多 5 行数据、每个元素最多 4 个表格，超出会被飞书截断。
+- 飞书 Markdown 表格每页固定 5 行、超出分页；完成后的卡片里，超过 5 行的表格改为表格组件（每页 10 行），一张卡片最多 5 个；生成过程中仍是 Markdown 表格。
+- "停止生成"按钮停止的是点击者自己的会话；话题群里在话题内发起的回合可能停不到（卡片回调不带话题信息）。
+- 没有 Unicode 下标字形的下标按连写处理（`$A_d$` → Ad，`$V_{daf}$` → Vdaf），与煤质、化学的纯文本写法一致。
 - 矩阵、分段函数、多行对齐环境和含中文的公式不做图片排版，退回 Unicode 文本。
 - 卡片 JSON 上限 30 KB；按整张卡片计量，先压缩工具时间线；仍超长的回答在卡片里显示开头部分，完整内容由 Hermes 按普通消息发出。生成过程中超长时显示最新几段。
 - CardKit 流式模式 10 分钟后自动关闭；更长的回合继续用整卡更新刷新同一张卡片（没有打字机效果）。

@@ -601,7 +601,7 @@ class TestMathRendering:
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
         _run(adapter.send_stream_frame("密度 $\\delta_p = 1.45$，偏差 $E_p = \\frac{\\delta_{75}▌", chat_id=CHAT, turn_id="t1"))
         first = fake.pushes(cl.ANSWER_ELEMENT_ID)[-1]
-        assert "δₚ = 1.45" in first and "$E_p = \\frac{\\delta_{75}▌" in first, "closed formula converted, open one kept raw"
+        assert first == "密度 δₚ = 1.45，偏差▌", "closed formula converted, the one still being typed held back"
         final = "密度 $\\delta_p = 1.45$，偏差 $E_p = \\frac{\\delta_{75} - \\delta_{25}}{2}$"
         assert _run(adapter.send_stream_frame(final, finalize=True, chat_id=CHAT, turn_id="t1")) is True
         assert fake.pushes(cl.ANSWER_ELEMENT_ID)[-1] == "密度 δₚ = 1.45，偏差 Eₚ = (δ₇₅ - δ₂₅)/2"

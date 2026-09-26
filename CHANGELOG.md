@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 — 2026-09-26
+
+- Stop button: generating cards carry a "停止生成 / Stop" button; a click is dispatched as `/stop`
+  from the clicker through the bundled guarded pipeline (authorization unchanged) and answered
+  with a toast.  `FEISHU_CARD_STOP_BUTTON=false` hides it; it is also hidden when the bundled
+  adapter lacks the card-callback seams.
+- Long tables: in completed cards (and cron cards) markdown tables with more than 5 data rows
+  become Card JSON 2.0 `table` components (10 rows per page, alignment from the separator row,
+  numeric columns right-aligned, first column frozen when wide), up to 5 per card.
+- Math: formulas still being typed are held back from streaming frames (no raw LaTeX flash);
+  subscripts without a Unicode form are written run-on (A_d → Ad, V_{daf} → Vdaf, Q_{gr,d} →
+  Qgr,d); `\mathrm{g/cm^3}` → g/cm³ (math-font commands parse their argument); `cases` rows
+  read "value，condition".
+- Fixed: any `$` in an answer stripped the indentation of every line (nested lists flattened).
+- Fixed: the cron card footer showed the server clock's zone (UTC on servers) instead of Hermes's
+  configured `timezone`.
+- Test guarding that the plugin's `feishu` registration keeps every field the bundled entry has.
+
 ## 0.2.2 — 2026-09-26
 
 - Cron cards use a violet header instead of blue, so scheduled pushes no longer look like a chat

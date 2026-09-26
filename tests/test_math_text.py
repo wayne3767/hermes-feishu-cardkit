@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from feishu_cardkit.math_text import convert_math, latex_to_unicode
+from feishu_cardkit.math_text import convert_math, hide_open_formula, latex_to_unicode
 
 
 @pytest.mark.parametrize("latex, expected", [
@@ -19,7 +19,11 @@ from feishu_cardkit.math_text import convert_math, latex_to_unicode
     (r"\begin{pmatrix} 1 & 0 \\ 0 & 1 \end{pmatrix}", "(1 0; 0 1)"),
     (r"\hat{x}, \bar{y}, \vec{v}, \sqrt[3]{8}", "x̂, ȳ, v⃗, ³√8"),
     (r"\lim_{n \to \infty} a_n, \log_2 n, e^{i\pi} + 1 = 0", "lim_(n → ∞) aₙ, log₂ n, e^iπ + 1 = 0"),
-    (r"\eta = \frac{\gamma_c (\beta - \alpha)}{\alpha (\beta - \theta)} \times 100\%", "η = (γ_c (β - α))/(α (β - θ)) × 100%"),
+    (r"\eta = \frac{\gamma_c (\beta - \alpha)}{\alpha (\beta - \theta)} \times 100\%", "η = (γc (β - α))/(α (β - θ)) × 100%"),
+    (r"A_d = 12.5\%, V_{daf}, M_t, Q_{gr,d}, Q_{net,ar}", "Ad = 12.5%, Vdaf, Mₜ, Qgr,d, Qnet,ar"),
+    (r"\varepsilon_{c,i} = \gamma_{c,i} / \gamma_{f,i}", "εc,i = γc,i / γf,i"),
+    (r"\rho = 1.4\ \mathrm{g/cm^3}, \mathrm{kg/m^{3}}", "ρ = 1.4 g/cm³, kg/m³"),
+    (r"f(x) = \begin{cases} a & x>0 \\ b & x\le 0 \end{cases}", "f(x) = {a，x>0; b，x ≤ 0"),
     (r"\mathrm{d}\rho / \mathrm{d}t \cdot \Delta \theta", "dρ / dt · Δ θ"),
     (r"\operatorname{sgn}(x) \quad \text{for } x \ne 0", "sgn(x) for x ≠ 0"),
     (r"\unknowncmd{x}", "unknowncmdx"),
@@ -53,6 +57,13 @@ class TestConvertMath:
         text = "`$\\alpha$` 内联\n```\n$\\beta$\n```\n$\\gamma^2$"
         assert convert_math(text) == "`$\\alpha$` 内联\n```\n$\\beta$\n```\nγ²"
 
+    def test_indentation_outside_formulas_survives(self):
+        text = "- 一级\n  - 二级（价格 $5）\n    - 三级 $x^2$"
+        assert convert_math(text) == "- 一级\n  - 二级（价格 $5）\n    - 三级 x²"
+
+    def test_blanks_hugging_a_block_are_dropped(self):
+        assert convert_math("前文  $$x^2$$  后文") == "前文\n\n　　x²\n\n后文"
+
     def test_streaming_prefix_stability(self):
         # A frame that ends mid-formula keeps the raw prefix; the next frame converts it.
         partial = "结果是 $\\frac{a}{b"
@@ -65,3 +76,17 @@ class TestConvertMath:
 
     def test_pathological_input_never_raises(self):
         assert isinstance(convert_math("$" + "{" * 50 + "\\frac" + "$"), str)
+
+
+@pytest.mark.parametrize("frame, shown", [
+    ("结果是 $\\frac{a}{b", "结果是"),
+    ("推导：\n\n$$E = mc", "推导："),
+    ("见 \\[ x^2", "见"),
+    ("由 \\(a \\le", "由"),
+    ("闭合 $x^2$ 后接 $\\alpha", "闭合 $x^2$ 后接"),
+    ("价格 $5 和 $10", "价格 $5 和 $10"),
+    ("```\n$\\alpha", "```\n$\\alpha"),
+    ("完整 $$x$$ 结束", "完整 $$x$$ 结束"),
+])
+def test_hide_open_formula(frame: str, shown: str) -> None:
+    assert hide_open_formula(frame) == shown

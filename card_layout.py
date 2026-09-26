@@ -36,6 +36,14 @@ ANSWER_ELEMENT_ID = "hermes_answer"
 TIMELINE_PANEL_ID = "hermes_timeline"
 TIMELINE_ELEMENT_ID = "hermes_timeline_md"
 FOOTER_ELEMENT_ID = "hermes_footer"
+STOP_BUTTON_ID = "hermes_stop"
+# Card-action value of the stop button; the adapter turns a click into "/stop" for the clicker.
+STOP_ACTION = {"hermes_cardkit": "stop"}
+# Markdown tables show 5 data rows per page (fixed); longer ones become table components (up to
+# 10 rows per page) in the completed layout.  Feishu allows 5 table components per card.
+MARKDOWN_TABLE_ROWS = 5
+TABLE_PAGE_SIZE = 10
+MAX_TABLE_COMPONENTS = 5
 DEFAULT_CARD_TITLE = "Hermes Agent"
 SEED_PLACEHOLDER = "…"
 # Feishu rejects card JSON above 30 KB.  CARD_JSON_MAX_BYTES caps the serialized card actually
@@ -69,14 +77,19 @@ class Labels:
     tool_only: str  # answer placeholder for a tool-only turn
     clipped_head: str  # heads a running answer that shows only its newest paragraphs
     scheduled: str  # card title / footer word for cron deliveries
+    stop_button: str  # button on a generating card
+    stop_toast: str  # toast after the stop button is clicked
+    stop_failed: str  # toast when the click cannot be turned into /stop
 
 
 ZH = Labels(running="生成中", done="已完成", stopped="已停止", generating="生成中…", timeline_empty="尚无工具调用",
             omitted="… 已省略 {n} 行", tools="{n} 次工具调用", figure="图{n}", table="表{n}", picture="图片", tool_only="✅",
-            clipped_head="…（前文较长已省略，完整内容在生成结束后给出）", scheduled="定时任务")
+            clipped_head="…（前文较长已省略，完整内容在生成结束后给出）", scheduled="定时任务",
+            stop_button="停止生成", stop_toast="已请求停止", stop_failed="未能停止，请发送 /stop")
 EN = Labels(running="Generating", done="Done", stopped="Stopped", generating="Generating…", timeline_empty="No tool calls yet",
             omitted="… {n} earlier lines omitted", tools="{n} tool calls", figure="Figure {n}", table="Table {n}", picture="Image",
-            tool_only="✅", clipped_head="… (earlier text omitted; the full answer follows when done)", scheduled="Scheduled task")
+            tool_only="✅", clipped_head="… (earlier text omitted; the full answer follows when done)", scheduled="Scheduled task",
+            stop_button="Stop", stop_toast="Stopping…", stop_failed="Could not stop; send /stop")
 _LABELS = {"zh": ZH, "en": EN}
 
 
@@ -304,14 +317,58 @@ def _is_table(lines: List[str], start: int) -> bool:
             and set(lines[start + 1].strip()) <= set("|:- ") and "-" in lines[start + 1])
 
 
+def _cells(line: str) -> List[str]:
+    """Cells of one markdown table row (``\\|`` stays a literal pipe)."""
+    body = line.strip()
+    body = body[1:] if body.startswith("|") else body
+    body = body[:-1] if body.endswith("|") and not body.endswith("\\|") else body
+    return [cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", body)]
+
+
+_NUMBER_RE = re.compile(r"^[-+−]?[\d,，]*\.?\d+\s*%?$|^[—–-]$|^$")
+
+
+def table_component(lines: List[str]) -> Dict[str, Any]:
+    """A markdown table as a Card JSON 2.0 ``table`` component: markdown cells, alignment from the
+    separator row (numeric columns right-aligned by default), ``TABLE_PAGE_SIZE`` rows per page."""
+    header, rows = _cells(lines[0]), [_cells(line) for line in lines[2:]]
+    aligns = _cells(lines[1])
+    columns = []
+    for i, name in enumerate(header):
+        spec = aligns[i].strip() if i < len(aligns) else ""
+        if spec.startswith(":") and spec.endswith(":"):
+            align = "center"
+        elif spec.endswith(":"):
+            align = "right"
+        elif spec.startswith(":"):
+            align = "left"
+        else:
+            numeric = rows and all(_NUMBER_RE.match(row[i] if i < len(row) else "") for row in rows)
+            align = "right" if numeric else "left"
+        columns.append({"name": f"c{i}", "display_name": name or " ", "data_type": "markdown", "width": "auto",
+                        "horizontal_align": align, "vertical_align": "center"})
+    table = {
+        "tag": "table", "page_size": TABLE_PAGE_SIZE, "row_height": "low",
+        "header_style": {"text_align": "left", "text_size": "normal", "background_style": "grey",
+                         "text_color": "default", "bold": True, "lines": 1},
+        "columns": columns,
+        "rows": [{f"c{i}": (row[i] if i < len(row) else "") for i in range(len(header))} for row in rows],
+    }
+    if len(columns) > 4:
+        table["freeze_first_column"] = True  # wide tables scroll sideways on phones
+    return table
+
+
 def layout_answer_elements(markdown: str, labels: Labels = ZH, *, number_tables: bool = True) -> List[Dict[str, Any]]:
     """Completed-card body: prose stays markdown; a figure block becomes a centred element (caption
     centred under the image); a table gets a centred ``表N　标题`` element above it, the title taken
     from a ``表N：…`` line the model wrote just before the table (same or previous paragraph).
-    ``number_tables=False`` (cron cards): no ``表N`` numbering, a caption line only when one was written."""
+    ``number_tables=False`` (cron cards): no ``表N`` numbering, a caption line only when one was written.
+    Tables longer than ``MARKDOWN_TABLE_ROWS`` data rows become paged table components (the first
+    ``MAX_TABLE_COMPONENTS`` of them; later ones stay markdown)."""
     elements: List[Dict[str, Any]] = []
     prose: List[str] = []
-    table_no = 0
+    table_no = components = 0
 
     def _flush_prose() -> None:
         text = "\n\n".join(prose).strip("\n")
@@ -345,6 +402,8 @@ def layout_answer_elements(markdown: str, labels: Labels = ZH, *, number_tables:
             prose.append(block)
             continue
         head, table = lines[:start], lines[start:]
+        end = next((i for i in range(2, len(table)) if not _TABLE_LINE_RE.match(table[i])), len(table))
+        table, tail = table[:end], table[end:]
         title = _pop_caption(head)
         if head:
             prose.append("\n".join(head))
@@ -353,7 +412,13 @@ def layout_answer_elements(markdown: str, labels: Labels = ZH, *, number_tables:
         caption = labels.table.format(n=table_no) + (f"　{title}" if title else "") if number_tables else title
         if caption:
             elements.append({"tag": "markdown", "text_align": "center", "content": f"<font color=\"grey\">{caption}</font>"})
-        elements.append({"tag": "markdown", "content": "\n".join(table)})
+        if len(table) - 2 > MARKDOWN_TABLE_ROWS and components < MAX_TABLE_COMPONENTS:
+            components += 1
+            elements.append(table_component(table))
+        else:
+            elements.append({"tag": "markdown", "content": "\n".join(table)})
+        if tail:
+            prose.append("\n".join(tail))
     _flush_prose()
     for index, element in enumerate(elements):
         element["element_id"] = ANSWER_ELEMENT_ID if index == 0 else f"{ANSWER_ELEMENT_ID}_{index}"
@@ -362,7 +427,7 @@ def layout_answer_elements(markdown: str, labels: Labels = ZH, *, number_tables:
 
 def build_stream_card(
     *, title: str, markdown: str, timeline_md: str, tool_count: int, footer: str, phase: str, summary: str = "",
-    labels: Labels = ZH, streaming: Optional[bool] = None, plain: bool = False,
+    labels: Labels = ZH, streaming: Optional[bool] = None, plain: bool = False, stop_button: bool = False,
 ) -> Dict[str, Any]:
     """Card JSON 2.0 for one turn.  ``markdown`` is the answer exactly as it should show (math and
     images already rendered); streaming mode is on only while ``phase`` is running (``streaming=False``
@@ -385,6 +450,10 @@ def build_stream_card(
         })
     elements.append({"tag": "hr"})
     elements.append({"tag": "markdown", "element_id": FOOTER_ELEMENT_ID, "text_size": "notation", "content": footer})
+    if running and stop_button:
+        elements.append({"tag": "button", "element_id": STOP_BUTTON_ID, "type": "default", "size": "small",
+                         "text": {"tag": "plain_text", "content": labels.stop_button},
+                         "behaviors": [{"type": "callback", "value": dict(STOP_ACTION)}]})
     config: Dict[str, Any] = {"streaming_mode": streaming, "update_multi": True}
     if streaming:
         config["streaming_config"] = {"print_frequency_ms": {"default": 50}, "print_step": {"default": 2}, "print_strategy": "fast"}
@@ -423,5 +492,6 @@ __all__ = [
     "utf8_len", "truncate_utf8", "json_text_bytes", "card_json_bytes", "clip_markdown_head", "clip_markdown_tail",
     "format_duration", "render_answer", "summary_for", "render_timeline",
     "timeline_title", "render_footer", "title_from_filename", "image_block", "append_images", "place_images",
-    "layout_answer_elements", "build_stream_card", "timeline_update_actions", "footer_update_actions",
+    "layout_answer_elements", "table_component", "build_stream_card", "STOP_BUTTON_ID", "STOP_ACTION",
+    "MARKDOWN_TABLE_ROWS", "TABLE_PAGE_SIZE", "MAX_TABLE_COMPONENTS", "timeline_update_actions", "footer_update_actions",
 ]

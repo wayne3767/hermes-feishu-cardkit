@@ -42,7 +42,10 @@ _FUNCTIONS = {
     "sin", "cos", "tan", "cot", "sec", "csc", "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh", "log",
     "ln", "lg", "exp", "max", "min", "sup", "inf", "lim", "det", "dim", "deg", "gcd", "arg", "ker", "Pr",
 }
-_TEXT_COMMANDS = {"text", "mathrm", "mathbf", "mathit", "mathsf", "mathtt", "textbf", "textit", "textrm", "operatorname", "mathcal", "mathbb", "boldsymbol", "bm"}
+# Text-mode commands keep their argument verbatim; math-font commands still parse theirs
+# (``\mathrm{g/cm^3}`` → g/cm³).
+_TEXT_COMMANDS = {"text", "textbf", "textit", "textrm", "mbox"}
+_FONT_COMMANDS = {"mathrm", "mathbf", "mathit", "mathsf", "mathtt", "operatorname", "mathcal", "mathbb", "boldsymbol", "bm"}
 _ACCENTS = {"hat": "̂", "bar": "̄", "overline": "̄", "vec": "⃗", "dot": "̇", "ddot": "̈", "tilde": "̃", "widehat": "̂", "widetilde": "̃"}
 _SUPERSCRIPT = str.maketrans("0123456789+-=()ni", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ")
 _SUBSCRIPT = str.maketrans("0123456789+-=()aeoxhklmnpstijruv", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜᵢⱼᵣᵤᵥ")
@@ -52,15 +55,17 @@ _SUB_OK = set("0123456789+-=()aeoxhklmnpstijruv")
 _SPACED_SYMBOLS = set("=≈≠≤≥≡∝×·÷±∓→←⇒⇐↔⇔∈∉⊂⊆∪∩∼≃")
 _OPERAND_END = set(")]}!′|%⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁾ⁿⁱ₀₁₂₃₄₅₆₇₈₉₊₋₌₎ₐₑₒₓₕₖₗₘₙₚₛₜᵢⱼᵣᵤᵥ")
 _SCRIPT_CHARS = "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜᵢⱼᵣᵤᵥ"
+# Short Latin subscripts without a full Unicode subscript form are written run-on: Ad, Vdaf, Qgr,d.
+_PLAIN_SUBSCRIPT_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{0,4}(?:,[A-Za-z0-9]{1,4})?")
 _MATRIX_ENVS = {"matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix", "array", "cases", "aligned", "align", "align*", "equation", "equation*", "gather", "split"}
 _MATRIX_BRACKETS = {"pmatrix": ("(", ")"), "bmatrix": ("[", "]"), "Bmatrix": ("{", "}"), "vmatrix": ("|", "|"), "Vmatrix": ("‖", "‖"), "cases": ("{", "")}
 
 _CMD_RE = re.compile(r"\\([A-Za-z]+|.)")
 # Pandoc-style inline math: no space just inside the dollars, closing dollar not followed by a digit.
 _INLINE_DOLLAR_RE = re.compile(r"(?<![\\$\w])\$(?=\S)((?:\\.|[^$\n\\])+?)(?<=\S)\$(?![\d$])")
-_BLOCK_DOLLAR_RE = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
+_BLOCK_DOLLAR_RE = re.compile(r"[ \t]*\$\$(.+?)\$\$[ \t]*", re.DOTALL)
 _PAREN_RE = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
-_BRACKET_RE = re.compile(r"\\\[(.+?)\\\]", re.DOTALL)
+_BRACKET_RE = re.compile(r"[ \t]*\\\[(.+?)\\\][ \t]*", re.DOTALL)
 _CODE_RE = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]*`)", re.DOTALL)
 _MATH_HINT_RE = re.compile(r"[\\^_]|[α-ωΑ-Ω∑∫√≤≥≠±×]")
 
@@ -156,6 +161,8 @@ class _Parser:
             return _GREEK[name]
         if name in _TEXT_COMMANDS:
             return self._raw_group()
+        if name in _FONT_COMMANDS:
+            return self._group()
         if name == "frac" or name == "dfrac" or name == "tfrac":
             num, den = self._group(), self._group()
             return f"{_paren(num)}/{_paren(den)}"
@@ -195,7 +202,8 @@ class _Parser:
         self.pos = end + len(end_marker) if end >= 0 else len(self.src)
         if env == "array" and self._peek() == "{":  # column spec
             self._raw_group()
-        rows = [" ".join(_convert_expression(cell).strip() for cell in row.split("&")).strip()
+        joiner = "，" if env == "cases" else " "  # cases: value，condition
+        rows = [joiner.join(c for c in (_convert_expression(cell).strip() for cell in row.split("&")) if c)
                 for row in body.split("\\\\") if row.strip()]
         if env not in _MATRIX_ENVS:
             return "; ".join(rows)
@@ -235,6 +243,8 @@ def _script(text: str, *, superscript: bool) -> str:
     ok, table = (_SUP_OK, _SUPERSCRIPT) if superscript else (_SUB_OK, _SUBSCRIPT)
     if all(ch in ok for ch in text):
         return text.translate(table)
+    if not superscript and _PLAIN_SUBSCRIPT_RE.fullmatch(text):
+        return text  # no Unicode glyph (A_d, V_daf, Q_gr,d): written run-on, as coal standards do in plain text
     mark = "^" if superscript else "_"
     if len(text) == 1 or re.fullmatch(r"[\w一-鿿]+", text):
         return f"{mark}{text}"
@@ -277,6 +287,30 @@ def convert_math(markdown: str, block_renderer: Optional[BlockRenderer] = None) 
     return "".join(parts)
 
 
+_TRAILING_INLINE_RE = re.compile(r"(?<![\\$\w])\$(?=\S)[^$\n]*$")
+
+
+def hide_open_formula(markdown: str) -> str:
+    """A streaming frame without the formula still being typed at its end (an unclosed ``$$``,
+    ``\\[``, ``\\(`` or math-looking ``$…``), so the card never flashes raw LaTeX that turns into
+    Unicode a frame later.  Text inside an open code fence, and prices like ``$5``, stay."""
+    if markdown.count("```") % 2:
+        return markdown
+    outside = "".join(_CODE_RE.split(markdown)[0::2])
+    cut = -1
+    if outside.count("$$") % 2:
+        cut = markdown.rfind("$$")
+    elif outside.count("\\[") > outside.count("\\]"):
+        cut = markdown.rfind("\\[")
+    elif outside.count("\\(") > outside.count("\\)"):
+        cut = markdown.rfind("\\(")
+    else:
+        match = _TRAILING_INLINE_RE.search(markdown)
+        if match and _looks_like_math(match.group(0)[1:]):
+            cut = match.start()
+    return markdown[:cut].rstrip() if cut >= 0 else markdown
+
+
 def iter_block_formulas(markdown: str) -> Iterator[str]:
     """Bodies of every complete display formula outside code, in document order."""
     parts = _CODE_RE.split(markdown)
@@ -299,10 +333,9 @@ def _convert_segment(text: str, block_renderer: Optional[BlockRenderer] = None) 
     text = _BRACKET_RE.sub(_render_block, text)
     text = _PAREN_RE.sub(lambda m: latex_to_unicode(m.group(1)), text)
     text = _INLINE_DOLLAR_RE.sub(lambda m: latex_to_unicode(m.group(1)) if _looks_like_math(m.group(1)) else m.group(0), text)
-    # Prose spaces that hugged the original ``$$`` must not hang around the block's paragraph breaks.
-    text = re.sub(r"[ \t]+\n", "\n", text)
-    text = re.sub(r"\n[ \t]+", "\n", text)
-    return re.sub(r"\n{3,}", "\n\n", text)  # a block already surrounded by blank lines must not stack more
+    # The block patterns swallow the blanks hugging ``$$`` themselves, so indentation elsewhere
+    # (nested lists, indented code) survives; only the blank lines a block adds are collapsed.
+    return re.sub(r"\n{3,}", "\n\n", text)
 
 
 def _block(body: str) -> str:
@@ -311,4 +344,4 @@ def _block(body: str) -> str:
     return "\n\n" + "\n".join(f"　　{line}" for line in lines) + "\n\n"
 
 
-__all__ = ["convert_math", "iter_block_formulas", "latex_to_unicode"]
+__all__ = ["convert_math", "hide_open_formula", "iter_block_formulas", "latex_to_unicode"]
