@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-09-26
+
+- Cron cards strip Hermes's default English wrapper ("Cronjob Response: <name> / (job_id: …) /
+  -----" and the "To stop or manage this job…" trailer, on unless `cron.wrap_response: false`).
+  The job name moves to the footer ("⏰ 定时任务 · <name> · MM-DD HH:MM") and titles cards whose
+  text has no title line.  0.2.0 showed the wrapper line as the card title.
+
 ## 0.2.0 — 2026-09-26
 
 - Cron deliveries as cards: when Hermes delivers a scheduled job's output (`metadata["job_id"]`),

@@ -28,6 +28,12 @@ REPORT = """📋 示例选煤厂 生产日报 2026-01-02（自动生成 · 06:00
 看板：https://example.com/"""
 
 
+def _wrapped(content: str, name: str = "邢美生产日报推送飞书", job_id: str = "abc123") -> str:
+    """Hermes's default cron wrapper (cron/scheduler_delivery.py, cron.wrap_response: true)."""
+    return (f"Cronjob Response: {name}\n(job_id: {job_id})\n-------------\n\n{content}\n\n"
+            f"To stop or manage this job, send me a new message (e.g. \"stop reminder {name}\").")
+
+
 def _texts(card: Dict[str, Any]) -> str:
     return "\n".join(e.get("content", "") for e in card["body"]["elements"])
 
@@ -51,6 +57,29 @@ class TestSplitTitle:
         for text in ("只有一行", "- 列表开头\n- 第二项", "长" * (cc.TITLE_MAX_CHARS + 1) + "\n正文", "| a |\n|---|\n| 1 |"):
             title, subtitle, body = cc.split_title(text)
             assert (title, subtitle, body) == ("", "", text.strip())
+
+
+class TestUnwrap:
+    def test_hermes_wrapper_is_removed(self):
+        assert cc.unwrap(_wrapped(REPORT)) == ("邢美生产日报推送飞书", REPORT)
+
+    def test_unwrapped_text_is_untouched(self):
+        assert cc.unwrap(REPORT) == ("", REPORT)
+        assert cc.unwrap("Cronjob Response: x\n正文") == ("", "Cronjob Response: x\n正文")
+
+    def test_wrapped_card_uses_inner_title_and_names_job_in_footer(self):
+        card = cc.build_cron_card(_wrapped(REPORT), sent_at="01-02 06:00")
+        assert card["header"]["title"]["content"] == "示例选煤厂 生产日报 2026-01-02"
+        text = _texts(card)
+        assert "Cronjob Response" not in text and "job_id" not in text and "To stop" not in text
+        assert card["body"]["elements"][-1]["content"] == "⏰ 定时任务 · 邢美生产日报推送飞书 · 01-02 06:00"
+
+    def test_wrapped_lone_line_is_titled_by_job_name(self):
+        card = cc.build_cron_card(_wrapped("[午间复核失败] 2026-01-02：接口不可用", name="午间复核"))
+        assert card["header"]["title"]["content"] == "午间复核" and card["header"]["template"] == "red"
+
+    def test_wrapper_around_nothing_keeps_bundled_path(self):
+        assert cc.build_cron_card(_wrapped("")) is None
 
 
 class TestBuildCronCard:
@@ -95,7 +124,7 @@ class TestAdapterSend:
 
     def test_cron_delivery_is_one_card(self):
         adapter, fake = _adapter()
-        result = _run(adapter.send(CHAT, REPORT, metadata={"job_id": "job1", "notify": True}))
+        result = _run(adapter.send(CHAT, _wrapped(REPORT), metadata={"job_id": "job1", "notify": True}))
         assert result.success
         sent = self._sent(fake)
         assert len(sent) == 1 and sent[0][0] == "interactive"

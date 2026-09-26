@@ -17,7 +17,7 @@ Out of the box, Hermes delivers a Feishu/Lark reply as a plain message that gets
 - Tool calls fold into a collapsed **"Thinking & tools · N tool calls"** panel instead of a stream of progress messages.
 - Inline LaTeX becomes Unicode math text (`\delta_p` → δₚ, `\frac{a}{b}` → (a)/(b)); display formulas are typeset into images when `matplotlib` is available.
 - Images the model attaches (`MEDIA:` lines) are placed inside the card where the model put them, with centred **"Figure N · title"** captions; markdown tables get a **"Table N · title"** heading.
-- Cron deliveries (scheduled job output) go out as **one static card**: the first line becomes the header (a trailing `(…)` the subtitle), the rest keeps its headings and tables, a footer marks it as a scheduled task; failures get a red header.
+- Cron deliveries (scheduled job output) go out as **one static card**: the first line becomes the header (a trailing `(…)` the subtitle), the rest keeps its headings and tables, Hermes's English "Cronjob Response" wrapper is removed and the job name goes into a scheduled-task footer; failures get a red header.
 - Every step degrades to Hermes's normal delivery on failure (missing CardKit scope, upload error, oversized answer, an incompatible Hermes build). Text and images are never lost.
 
 ### How it works — no core patches
@@ -92,7 +92,7 @@ Hermes 的飞书通道默认把回复作为普通消息反复编辑。这个插�
 - 工具调用收进折叠面板"思考与工具 · N 次工具调用"，不刷屏
 - 行内 LaTeX 公式转成 Unicode 数学文本；块级公式在装了 matplotlib 时排版成图片
 - 模型附带的图片（`MEDIA:` 行）嵌进卡片正文对应位置，带居中的"图N 标题"图注；表格上方加"表N 标题"表题
-- 定时任务（cron）的输出以**一张静态卡片**发出：首行作标题（末尾括号内容作副标题），其余保留标题层级和表格，页脚注明"定时任务"；标题含"失败"等字样时标题栏为红色
+- 定时任务（cron）的输出以**一张静态卡片**发出：首行作标题（末尾括号内容作副标题），其余保留标题层级和表格，Hermes 默认加的英文外壳（"Cronjob Response…"）会去掉，任务名放进"定时任务"页脚；标题含"失败"等字样时标题栏为红色
 - 任一环节失败都退回 Hermes 原有的投递方式，文字和图片不会丢
 
 **不修改 Hermes 的任何源码文件。** 插件在运行时用 Hermes 平台注册表的"后注册者优先"规则接管 `feishu` 平台条目，适配器是内置飞书适配器的子类。`hermes update` 不会撤销安装；上游改内部实现时，插件只依赖适配器的流式接口和少数几个稳定接缝，接缝缺失时自动退回内置适配器。
