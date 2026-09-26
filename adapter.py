@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 
 from plugins.platforms.feishu import adapter as _bundled
 
-from .cron_card import build_cron_card
+from .cron_card import DEFAULT_TEMPLATE, TEMPLATES, build_cron_card
 from .streaming import FeishuStreamingCardMixin
 
 logger = logging.getLogger("hermes_feishu_cardkit")
@@ -80,6 +80,11 @@ class CardkitFeishuAdapter(FeishuStreamingCardMixin, _bundled.FeishuAdapter):
         self._card_math_images = _truthy(_setting(extra, "card_math_images", "FEISHU_CARD_MATH_IMAGES", "true"))
         self._card_locale = str(_setting(extra, "card_locale", "FEISHU_CARD_LOCALE", "")).strip().lower()
         self._cron_card = _truthy(_setting(extra, "cron_card", "FEISHU_CRON_CARD", "true"))
+        template = str(_setting(extra, "cron_card_template", "FEISHU_CRON_CARD_TEMPLATE", DEFAULT_TEMPLATE)).strip().lower()
+        if template not in TEMPLATES:
+            logger.warning("[Feishu] unknown cron card template %r; using %s", template, DEFAULT_TEMPLATE)
+            template = DEFAULT_TEMPLATE
+        self._cron_card_template = template
 
     # --- Cron deliveries as cards ------------------------------------------------------------------
 
@@ -88,7 +93,8 @@ class CardkitFeishuAdapter(FeishuStreamingCardMixin, _bundled.FeishuAdapter):
         """Cron deliveries (Hermes marks them with ``metadata["job_id"]``) go out as one static card;
         everything else, and any card Feishu rejects, takes the bundled path unchanged."""
         if self._cron_card and self._client is not None and "job_id" in (metadata or {}):
-            card = build_cron_card(content, labels=self._labels, sent_at=time.strftime("%m-%d %H:%M"))
+            card = build_cron_card(content, labels=self._labels, sent_at=time.strftime("%m-%d %H:%M"),
+                                   template=self._cron_card_template)
             if card is not None:
                 try:
                     response = await self._feishu_send_with_retry(

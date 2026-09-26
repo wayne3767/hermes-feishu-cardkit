@@ -88,7 +88,7 @@ class TestBuildCronCard:
         assert card["schema"] == "2.0" and card["config"]["width_mode"] == "fill"
         assert card["header"]["title"]["content"] == "示例选煤厂 生产日报 2026-01-02"
         assert card["header"]["subtitle"]["content"] == "自动生成 · 06:00 推送"
-        assert card["header"]["template"] == "blue"
+        assert card["header"]["template"] == "violet", "scheduled pushes stay apart from chat blue / green / grey"
         assert card["config"]["summary"]["content"] == "示例选煤厂 生产日报 2026-01-02"
         text = _texts(card)
         assert "## 产量" in text and "| 夜班 | 01:10 | 08:40 | 500 |" in text
@@ -107,6 +107,10 @@ class TestBuildCronCard:
         lone = cc.build_cron_card("[午间复核失败] 2026-01-02：接口不可用")
         assert lone["header"]["title"]["content"] == "定时任务" and "接口不可用" in _texts(lone)
         assert cc.build_cron_card("⚠ 同步失败\n- 详情")["header"]["template"] == "red"
+
+    def test_template_override_does_not_mask_failure(self):
+        assert cc.build_cron_card("标题\n正文", template="indigo")["header"]["template"] == "indigo"
+        assert cc.build_cron_card("同步失败\n正文", template="indigo")["header"]["template"] == "red"
 
     def test_english_labels(self):
         card = cc.build_cron_card("only line", labels=cl.EN)
@@ -143,6 +147,19 @@ class TestAdapterSend:
         result = _run(adapter.send(CHAT, REPORT, metadata={"job_id": "job1"}))
         assert result.success
         assert [t for t, _ in self._sent(fake)] == ["interactive", "post"]
+
+    def test_template_setting(self):
+        adapter, fake = _adapter()
+        assert adapter._cron_card_template == "violet"
+        adapter._cron_card_template = "purple"
+        _run(adapter.send(CHAT, REPORT, metadata={"job_id": "job1"}))
+        assert json.loads(self._sent(fake)[0][1])["header"]["template"] == "purple"
+
+    def test_unknown_template_falls_back(self):
+        from gateway.config import PlatformConfig
+        from feishu_cardkit.adapter import CardkitFeishuAdapter
+        adapter = CardkitFeishuAdapter(PlatformConfig(enabled=True, extra={"cron_card_template": "Gold"}))
+        assert adapter._cron_card_template == "violet"
 
     def test_disabled_by_setting(self):
         adapter, fake = _adapter()

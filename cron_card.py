@@ -8,7 +8,8 @@ trailer; ``unwrap`` removes both and keeps the job name.  ``build_cron_card`` la
 as a card instead:
 
     header      the text's first line (a short title line, or a leading ``# heading``); a trailing
-                ``（…）`` becomes the subtitle; red when the title (or a lone line) reports a failure, blue otherwise
+                ``（…）`` becomes the subtitle; red when the title (or a lone line) reports a failure, violet otherwise (chat cards use
+                blue / green / grey for their progress, so scheduled pushes stay apart)
     body        the rest, laid out like a completed streaming card (prose, headings, tables);
                 an ``# H1`` right under the title line restates it and is dropped
     hr
@@ -31,6 +32,11 @@ _SUBTITLE_RE = re.compile(r"^(.+?)\s*[（(]([^（）()]+)[）)]\s*$")
 _H1_RE = re.compile(r"^#\s+(.+?)\s*#*\s*$")
 _NOT_A_TITLE_RE = re.compile(r"^\s*(?:#|\||[-*+]\s|\d+[.)、]\s|>|```|!\[)")
 _FAILURE_RE = re.compile(r"失败|异常|错误|failed|failure|error", re.IGNORECASE)
+DEFAULT_TEMPLATE = "violet"
+FAILURE_TEMPLATE = "red"
+# Feishu card header templates
+TEMPLATES = frozenset({"blue", "wathet", "turquoise", "green", "yellow", "orange", "red", "carmine",
+                       "violet", "purple", "indigo", "grey", "default"})
 _MEDIA_RE = re.compile(r"(?m)^\s*MEDIA:")
 # cron/scheduler_delivery.py: f"Cronjob Response: {name}\n(job_id: {id})\n-------------\n\n{content}\n\nTo stop or manage…"
 _WRAPPER_RE = re.compile(
@@ -68,7 +74,8 @@ def split_title(text: str) -> Tuple[str, str, str]:
     return title, subtitle, rest
 
 
-def build_cron_card(text: str, *, labels: Labels = ZH, sent_at: str = "") -> Optional[Dict[str, Any]]:
+def build_cron_card(text: str, *, labels: Labels = ZH, sent_at: str = "",
+                    template: str = DEFAULT_TEMPLATE) -> Optional[Dict[str, Any]]:
     """Card JSON 2.0 for one cron delivery, or None when the text should keep the bundled path
     (empty, carries ``MEDIA:`` attachments, or would exceed Feishu's card size limit)."""
     if not text or not text.strip() or _MEDIA_RE.search(text):
@@ -83,7 +90,7 @@ def build_cron_card(text: str, *, labels: Labels = ZH, sent_at: str = "") -> Opt
     footer = " · ".join(["⏰ " + labels.scheduled] + [part for part in (job_name, sent_at) if part])
     elements += [{"tag": "hr"}, {"tag": "markdown", "text_size": "notation", "content": footer}]
     header: Dict[str, Any] = {"title": {"tag": "plain_text", "content": title},
-                              "template": "red" if failed else "blue"}
+                              "template": FAILURE_TEMPLATE if failed else template}
     if subtitle:
         header["subtitle"] = {"tag": "plain_text", "content": subtitle}
     card = {
@@ -95,4 +102,4 @@ def build_cron_card(text: str, *, labels: Labels = ZH, sent_at: str = "") -> Opt
     return card if card_json_bytes(card) <= CARD_JSON_MAX_BYTES else None
 
 
-__all__ = ["build_cron_card", "split_title", "unwrap", "TITLE_MAX_CHARS"]
+__all__ = ["build_cron_card", "split_title", "unwrap", "TITLE_MAX_CHARS", "DEFAULT_TEMPLATE", "FAILURE_TEMPLATE", "TEMPLATES"]

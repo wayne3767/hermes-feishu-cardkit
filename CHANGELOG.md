@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2 — 2026-09-26
+
+- Cron cards use a violet header instead of blue, so scheduled pushes no longer look like a chat
+  turn still generating (chat cards keep blue / green / grey for running / done / stopped).
+  Failures stay red.  `FEISHU_CRON_CARD_TEMPLATE` (`platforms.feishu.cron_card_template`) picks
+  another Feishu card template; unknown names fall back to violet.
+
 ## 0.2.1 — 2026-09-26
 
 - Cron cards strip Hermes's default English wrapper ("Cronjob Response: <name> / (job_id: …) /
