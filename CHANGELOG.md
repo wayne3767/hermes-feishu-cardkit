@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 — 2026-09-26
+
+- Cron deliveries as cards: when Hermes delivers a scheduled job's output (`metadata["job_id"]`),
+  the text goes out as one static Card JSON 2.0 message instead of a `post`.  The first line (or
+  a leading `# heading`) becomes the header, a trailing `（…）` its subtitle, and an H1 that
+  restates the title line is dropped; the body keeps headings and tables (not numbered); the
+  footer reads "⏰ 定时任务 · MM-DD HH:MM".  Headers mentioning a failure are red.
+- Output with `MEDIA:` lines, over the 28 000-byte card budget, or rejected by Feishu goes out
+  through the bundled `send` unchanged.  `FEISHU_CRON_CARD=false` (`platforms.feishu.cron_card`)
+  turns the feature off.
+
 ## 0.1.1 — 2026-09-24
 
 Reliability fixes for long turns and failed card updates (no layout changes).

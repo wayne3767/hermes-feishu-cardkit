@@ -68,14 +68,15 @@ class Labels:
     picture: str  # fallback figure title
     tool_only: str  # answer placeholder for a tool-only turn
     clipped_head: str  # heads a running answer that shows only its newest paragraphs
+    scheduled: str  # card title / footer word for cron deliveries
 
 
 ZH = Labels(running="生成中", done="已完成", stopped="已停止", generating="生成中…", timeline_empty="尚无工具调用",
             omitted="… 已省略 {n} 行", tools="{n} 次工具调用", figure="图{n}", table="表{n}", picture="图片", tool_only="✅",
-            clipped_head="…（前文较长已省略，完整内容在生成结束后给出）")
+            clipped_head="…（前文较长已省略，完整内容在生成结束后给出）", scheduled="定时任务")
 EN = Labels(running="Generating", done="Done", stopped="Stopped", generating="Generating…", timeline_empty="No tool calls yet",
             omitted="… {n} earlier lines omitted", tools="{n} tool calls", figure="Figure {n}", table="Table {n}", picture="Image",
-            tool_only="✅", clipped_head="… (earlier text omitted; the full answer follows when done)")
+            tool_only="✅", clipped_head="… (earlier text omitted; the full answer follows when done)", scheduled="Scheduled task")
 _LABELS = {"zh": ZH, "en": EN}
 
 
@@ -303,10 +304,11 @@ def _is_table(lines: List[str], start: int) -> bool:
             and set(lines[start + 1].strip()) <= set("|:- ") and "-" in lines[start + 1])
 
 
-def layout_answer_elements(markdown: str, labels: Labels = ZH) -> List[Dict[str, Any]]:
+def layout_answer_elements(markdown: str, labels: Labels = ZH, *, number_tables: bool = True) -> List[Dict[str, Any]]:
     """Completed-card body: prose stays markdown; a figure block becomes a centred element (caption
     centred under the image); a table gets a centred ``表N　标题`` element above it, the title taken
-    from a ``表N：…`` line the model wrote just before the table (same or previous paragraph)."""
+    from a ``表N：…`` line the model wrote just before the table (same or previous paragraph).
+    ``number_tables=False`` (cron cards): no ``表N`` numbering, a caption line only when one was written."""
     elements: List[Dict[str, Any]] = []
     prose: List[str] = []
     table_no = 0
@@ -348,8 +350,9 @@ def layout_answer_elements(markdown: str, labels: Labels = ZH) -> List[Dict[str,
             prose.append("\n".join(head))
         _flush_prose()
         table_no += 1
-        caption = labels.table.format(n=table_no) + (f"　{title}" if title else "")
-        elements.append({"tag": "markdown", "text_align": "center", "content": f"<font color=\"grey\">{caption}</font>"})
+        caption = labels.table.format(n=table_no) + (f"　{title}" if title else "") if number_tables else title
+        if caption:
+            elements.append({"tag": "markdown", "text_align": "center", "content": f"<font color=\"grey\">{caption}</font>"})
         elements.append({"tag": "markdown", "content": "\n".join(table)})
     _flush_prose()
     for index, element in enumerate(elements):

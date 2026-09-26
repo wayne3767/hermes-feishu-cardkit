@@ -13,12 +13,15 @@ to the bundled adapter instead of breaking the channel.
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import os
-from typing import Any, Optional
+import time
+from typing import Any, Dict, Optional
 
 from plugins.platforms.feishu import adapter as _bundled
 
+from .cron_card import build_cron_card
 from .streaming import FeishuStreamingCardMixin
 
 logger = logging.getLogger("hermes_feishu_cardkit")
@@ -76,6 +79,31 @@ class CardkitFeishuAdapter(FeishuStreamingCardMixin, _bundled.FeishuAdapter):
         self._streaming_card = _truthy(_setting(extra, "streaming_card", "FEISHU_STREAMING_CARD", "true"))
         self._card_math_images = _truthy(_setting(extra, "card_math_images", "FEISHU_CARD_MATH_IMAGES", "true"))
         self._card_locale = str(_setting(extra, "card_locale", "FEISHU_CARD_LOCALE", "")).strip().lower()
+        self._cron_card = _truthy(_setting(extra, "cron_card", "FEISHU_CRON_CARD", "true"))
+
+    # --- Cron deliveries as cards ------------------------------------------------------------------
+
+    async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
+                   metadata: Optional[Dict[str, Any]] = None) -> Any:
+        """Cron deliveries (Hermes marks them with ``metadata["job_id"]``) go out as one static card;
+        everything else, and any card Feishu rejects, takes the bundled path unchanged."""
+        if self._cron_card and self._client is not None and "job_id" in (metadata or {}):
+            card = build_cron_card(content, labels=self._labels, sent_at=time.strftime("%m-%d %H:%M"))
+            if card is not None:
+                try:
+                    response = await self._feishu_send_with_retry(
+                        chat_id=chat_id, msg_type="interactive", payload=json.dumps(card, ensure_ascii=False),
+                        reply_to=reply_to, metadata=metadata,
+                    )
+                    result = self._finalize_send_result(response, "cron card send failed")
+                    if result.success:
+                        return result
+                    logger.warning("[Feishu] cron card for job %s rejected (%s); sending as a regular message",
+                                   metadata["job_id"], result.error)
+                except Exception as exc:
+                    logger.warning("[Feishu] cron card for job %s failed (%s); sending as a regular message",
+                                   metadata["job_id"], exc)
+        return await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
 
     # --- CardKit SDK -------------------------------------------------------------------------------
 
