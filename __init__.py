@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("hermes_feishu_cardkit")
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # Registry metadata mirrored from the bundled entry (plain values; the callables are proxied lazily).
 _STATIC_ENTRY = dict(
@@ -94,6 +94,10 @@ def register(ctx: Any) -> None:
         setup_fn=_proxy("setup_fn"), apply_yaml_config_fn=_proxy("apply_yaml_config_fn"),
         standalone_sender_fn=_standalone_send, **_STATIC_ENTRY,
     )
+    # Observe official lifecycle events in supported Hermes versions; the transport remains
+    # the bundled adapter subclass. Unsupported hooks leave ordinary cards fully usable.
+    from .lifecycle import register_hooks
+    register_hooks(ctx)
     logger.info("hermes-feishu-cardkit %s: 'feishu' platform now served by CardkitFeishuAdapter", __version__)
 
 

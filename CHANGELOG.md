@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0 — 2026-10-16
+
+- Keep the native platform plugin architecture; no sidecar, Hermes source patches or model calls.
+- Preserve native table content with automatic row height, content-weighted widths, extra data
+  columns, and whole-table Markdown fallback for unsupported structures or cells over 1,200
+  characters. Numeric alignment, 10-row paging and five-table budget remain.
+- Observe official Hermes lifecycle events using exact admitted message, profile, session and
+  agent-turn identities. Show waiting, declined, timed-out and failed states; five-minute text
+  silence now means "No recent progress", not "Stopped". An interaction boundary finalizes a
+  segment, not the entire turn; closed segments keep observing real resolution and retire safely.
+- Display actual model/provider, deduplicated per-turn input/output and latest request context
+  usage. Missing/ambiguous observations stay hidden; configured defaults are not execution proof.
+- Bind Stop to the original card, initiator, routed profile and topic through the bundled guards.
+  Unknown, foreign and expired clicks cannot stop another session. Missing upstream seams hide
+  controls without blocking normal message delivery.
+- Require the core-pinned runtime home and exact session identity for observations and clarification
+  controls. Bind Stop to the original processing guard, revalidate after the real chat lock, reject
+  terminal turns immediately, and fail closed on ambiguous topic anchors. A broken profile setting
+  reader no longer falls back to another profile's process environment.
+- Add native single-choice clarification cards using Hermes's original resolver, retaining
+  question/options and real answers. Timeout/cancel removes controls; multi-select, open-ended
+  and unproven routes use the native text path. Verified same-receipt navigation is optional;
+  no link is fabricated when the platform omits message position/link metadata.
+- Refresh settled clarification cards after late send acknowledgements; never update an empty
+  message id. Webhook transports retain the native text path because the bundled webhook handler
+  does not return card updates. Older Hermes without pinned identity keeps basic cards, without
+  optional controls or usage observations that cannot be safely attributed.
+- Add classic/task/detailed reading presets, explicit width/timeline overrides and redacted
+  display-setting provenance. An offline CLI generates ten state examples without SDK or network
+  imports; HTML is schematic, not a claim of client rendering acceptance.
+- Retain the bundled approval workflow and delivery retries. No exactly-once network-delivery
+  guarantee is added. Desktop/mobile display and real clicks still need deployment-time acceptance.
+
 ## 0.3.0 — 2026-09-26
 
 - Stop button: generating cards carry a "停止生成 / Stop" button; a click is dispatched as `/stop`

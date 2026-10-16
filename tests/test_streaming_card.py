@@ -321,7 +321,8 @@ class TestTurnLifecycle:
         assert els[cl.ANSWER_ELEMENT_ID]["content"] == "Hello world"
         assert els[cl.TIMELINE_PANEL_ID]["header"]["title"]["content"] == "思考与工具 · 1 次工具调用"
         assert els[cl.TIMELINE_ELEMENT_ID]["content"] == "🔍 Searching"
-        assert els[cl.FOOTER_ELEMENT_ID]["content"].startswith("✅ 已完成 · ") and "test-model" in els[cl.FOOTER_ELEMENT_ID]["content"]
+        assert els[cl.FOOTER_ELEMENT_ID]["content"].startswith("✅ 已完成 · ")
+        assert "test-model" not in els[cl.FOOTER_ELEMENT_ID]["content"], "configured models are not execution evidence"
         assert card["config"]["summary"]["content"] == "Hello world"
         assert not fake.named("settings"), "a successful full update already closes streaming mode"
         seqs = [c.request_body.sequence for n, c in fake.calls if n in ("content", "batch", "update")]
@@ -861,7 +862,7 @@ class TestAnswerLayout:
 class TestRobustness:
     """Abandoned turns, concurrent turns and cross-chat deliveries."""
 
-    def test_abandoned_turn_is_sealed_as_stopped_by_the_watchdog(self, monkeypatch):
+    def test_silent_turn_is_sealed_as_unknown_by_the_watchdog(self, monkeypatch):
         monkeypatch.setattr(fs, "IDLE_SEAL_SECONDS", 0.05)
         monkeypatch.setattr(fs, "_WATCHDOG_POLL_SECONDS", 0.02)
         adapter, fake = _adapter()
@@ -880,6 +881,7 @@ class TestRobustness:
         (update,) = fake.named("update")
         card = fake.card_of(update)
         assert card["header"]["template"] == "grey" and card["config"]["streaming_mode"] is False
+        assert card["header"]["subtitle"]["content"] == "暂未收到进展"
         assert _answer_text(card).startswith("partial")
 
     def test_finalized_turn_cancels_its_watchdog(self):
@@ -1050,6 +1052,7 @@ class TestIdleWatchdog:
         async def _scenario():
             await adapter.send_stream_frame("回答到一半", chat_id=CHAT, turn_id="t1")
             await adapter.send_stream_frame("另一个聊天", chat_id="oc_other", turn_id="t2")
+            adapter._stream_cards[f"{CHAT}:t1"].control_source = SimpleNamespace(session_key="agent:main:feishu:dm:x")
             await adapter.interrupt_session_activity("agent:main:feishu:dm:x", CHAT, metadata=None)
             await asyncio.sleep(0.2)
 

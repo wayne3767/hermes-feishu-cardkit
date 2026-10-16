@@ -22,6 +22,7 @@ class TestTableComponents:
         caption, table = els[0], els[1]
         assert caption["content"] == "<font color=\"grey\">表1　9 月产量</font>"
         assert table["tag"] == "table" and table["page_size"] == cl.TABLE_PAGE_SIZE
+        assert table["row_height"] == "auto" and table["row_max_height"] == "999px"
         assert [c["display_name"] for c in table["columns"]] == ["日期", "入洗 t", "备注"]
         assert [c["horizontal_align"] for c in table["columns"]] == ["left", "right", "left"]
         assert all(c["data_type"] == "markdown" for c in table["columns"])
@@ -41,7 +42,8 @@ class TestTableComponents:
 
     def test_escaped_pipe_and_ragged_rows(self):
         table = cl.table_component(["| a | b |", "|---|---|", "| x \\| y |", "| 1 | 2 | 3 |"])
-        assert table["rows"] == [{"c0": "x | y", "c1": ""}, {"c0": "1", "c1": "2"}]
+        assert table["rows"] == [{"c0": "x | y", "c1": "", "c2": ""}, {"c0": "1", "c1": "2", "c2": "3"}]
+        assert [column["display_name"] for column in table["columns"]] == ["a", "b", " "]
 
     def test_text_after_table_in_same_block_stays_prose(self):
         els = cl.layout_answer_elements(_table(6) + "\n注：单位为 t", number_tables=False)
@@ -70,6 +72,8 @@ class TestStopButton:
 
     def test_streaming_card_shows_button_until_sealed(self):
         adapter, fake = _adapter()
+        adapter._stop_button = True  # presentation only; unsupported-runtime gating is tested separately
+        adapter._can_stop_card = lambda turn: True  # binding authorization is covered by test_interactions
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
         assert cl.STOP_BUTTON_ID in _elements(fake.card_of(fake.named("create")[0]))
         _run(adapter.send_stream_frame("完成", chat_id=CHAT, turn_id="t1", finalize=True))
@@ -80,7 +84,7 @@ class TestStopButton:
             action=SimpleNamespace(value=value, tag="button"), token=token,
             context=SimpleNamespace(open_chat_id=chat), operator=SimpleNamespace(open_id=open_id)))
 
-    def test_click_dispatches_stop_for_the_clicker(self):
+    def test_unbound_click_cannot_dispatch_stop(self):
         adapter, _ = _adapter()
         loop = asyncio.new_event_loop()
         adapter._loop = loop
@@ -88,9 +92,8 @@ class TestStopButton:
         adapter._dispatch_synthetic_event = lambda **kw: dispatched.append(kw) or asyncio.sleep(0)
         adapter._submit_on_loop = lambda lp, coro: scheduled.append(coro) or True
         response = adapter._on_card_action_trigger(self._click(dict(cl.STOP_ACTION)))
-        assert response.toast.content == "已请求停止" and response.toast.type == "info"
-        (kw,) = dispatched
-        assert kw["text"] == "/stop" and kw["chat_id"] == "oc_x" and kw["sender_id"].open_id == "ou_1"
+        assert response.toast.type == "error"
+        assert not dispatched and not scheduled
         for coro in scheduled:
             loop.run_until_complete(coro)
         loop.close()
@@ -98,6 +101,7 @@ class TestStopButton:
     def test_duplicate_click_is_not_dispatched_twice(self):
         adapter, _ = _adapter()
         adapter._loop = asyncio.new_event_loop()
+        adapter._stop_turn_from_event = lambda event: object()  # independently verified binding
         adapter._is_card_action_duplicate = lambda token: True
         adapter._submit_on_loop = lambda *a: (_ for _ in ()).throw(AssertionError("dispatched"))
         assert adapter._on_card_action_trigger(self._click(dict(cl.STOP_ACTION))).toast.content == "已请求停止"

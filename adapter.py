@@ -15,16 +15,14 @@ from __future__ import annotations
 import importlib
 import json
 import logging
-import os
-import uuid
 from datetime import datetime
-from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from plugins.platforms.feishu import adapter as _bundled
 
 from .card_layout import STOP_ACTION
 from .cron_card import DEFAULT_TEMPLATE, TEMPLATES, build_cron_card
+from .interaction import CLARIFY_ACTION, CardInteractionMixin
 from .streaming import FeishuStreamingCardMixin
 
 logger = logging.getLogger("hermes_feishu_cardkit")
@@ -36,7 +34,8 @@ REQUIRED_BASE_ATTRS = (
     "_extract_response_field", "_handle_message_event_data", "disconnect",
 )
 # Seams the stop button needs on top of those; without them the button is simply not shown.
-STOP_BUTTON_ATTRS = ("_on_card_action_trigger", "_loop_accepts_callbacks", "_submit_on_loop", "_dispatch_synthetic_event")
+STOP_BUTTON_ATTRS = ("_on_card_action_trigger", "_loop_accepts_callbacks", "_submit_on_loop",
+                     "_validate_card_action", "_handle_message_with_guards", "_source_session_key")
 _CARDKIT_MODULE = "lark_oapi.api.cardkit.v1"
 
 
@@ -57,9 +56,11 @@ def _setting(extra: dict, key: str, env: str, default: str) -> Any:
         return extra[key]
     scoped = getattr(_bundled, "_get_scoped_secret", None)
     try:
-        value = scoped(env, default) if scoped else os.getenv(env, default)
+        value = scoped(env, default) if callable(scoped) else default
     except Exception:
-        value = os.getenv(env, default)
+        # The bundled reader owns the single-profile fallback. A failed or missing
+        # reader cannot establish that process-wide values belong to this adapter.
+        value = default
     return value if value not in (None, "") else default
 
 
@@ -84,7 +85,7 @@ def _build(request_cls: Any, **fields: Any) -> Any:
     return builder.build()
 
 
-class CardkitFeishuAdapter(FeishuStreamingCardMixin, _bundled.FeishuAdapter):
+class CardkitFeishuAdapter(CardInteractionMixin, FeishuStreamingCardMixin, _bundled.FeishuAdapter):
     """The bundled Feishu adapter with CardKit streaming cards."""
 
     def __init__(self, config: Any) -> None:
@@ -101,35 +102,33 @@ class CardkitFeishuAdapter(FeishuStreamingCardMixin, _bundled.FeishuAdapter):
         self._cron_card_template = template
         self._stop_button = (_truthy(_setting(extra, "card_stop_button", "FEISHU_CARD_STOP_BUTTON", "true"))
                              and all(hasattr(_bundled.FeishuAdapter, name) for name in STOP_BUTTON_ATTRS))
+        from .reading import resolve_reading
+        scoped = getattr(_bundled, "_get_scoped_secret", None)
+        self._card_reading = resolve_reading(
+            extra, env_get=(lambda name: scoped(name, None)) if callable(scoped) else None)
 
     # --- Stop button -------------------------------------------------------------------------------
 
     def _on_card_action_trigger(self, data: Any) -> Any:
-        """A click on a generating card's stop button becomes "/stop" from the clicker, through the
-        same guarded pipeline as a typed command (so the usual authorization applies and the stop
-        reaches the clicker's own session).  Every other click goes to the bundled handler."""
+        """Stop the clicked card's original session, through the bundled guarded pipeline."""
         event = getattr(data, "event", None)
         value = getattr(getattr(event, "action", None), "value", None) or {}
+        if isinstance(value, dict) and value.get("hermes_cardkit") == CLARIFY_ACTION:
+            if not self._loop_accepts_callbacks(getattr(self, "_loop", None)):
+                return self._card_response()
+            return self._on_clarify_card_action(event, value)
         if not (isinstance(value, dict) and value.get("hermes_cardkit") == STOP_ACTION["hermes_cardkit"]):
             return super()._on_card_action_trigger(data)
-        context, operator = getattr(event, "context", None), getattr(event, "operator", None)
-        chat_id = str(getattr(context, "open_chat_id", "") or "")
-        open_id = str(getattr(operator, "open_id", "") or "")
+        turn = self._stop_turn_from_event(event)
+        loop = getattr(self, "_loop", None)
+        if turn is None or not self._loop_accepts_callbacks(loop):
+            return self._toast("error", self._labels.stop_failed)
         token = str(getattr(event, "token", "") or "")
         duplicate = getattr(self, "_is_card_action_duplicate", None)
         if token and callable(duplicate) and duplicate(token):
             return self._toast("info", self._labels.stop_toast)
-        loop = getattr(self, "_loop", None)
-        if not chat_id or not open_id or not self._loop_accepts_callbacks(loop):
-            logger.warning("[Feishu] stop button click dropped (chat=%r, operator present=%s)", chat_id, bool(open_id))
+        if not self._submit_on_loop(loop, self._dispatch_bound_stop(data, turn)):
             return self._toast("error", self._labels.stop_failed)
-        from gateway.platforms.base import MessageType
-        logger.info("[Feishu] stop button clicked by %s in %s; dispatching /stop", open_id, chat_id)
-        self._submit_on_loop(loop, self._dispatch_synthetic_event(
-            text="/stop", message_type=MessageType.COMMAND, chat_id=chat_id,
-            sender_id=SimpleNamespace(open_id=open_id, user_id=None, union_id=None), event_chat_type="group",
-            raw_message=data, message_id=token or str(uuid.uuid4()),
-        ))
         return self._toast("info", self._labels.stop_toast)
 
     @staticmethod
@@ -226,7 +225,7 @@ class CardkitFeishuAdapter(FeishuStreamingCardMixin, _bundled.FeishuAdapter):
         if message is not None:
             self.remember_thread_for_message(
                 getattr(message, "message_id", None),
-                getattr(message, "thread_id", None) or getattr(message, "root_id", None),
+                getattr(message, "thread_id", None),
             )
         await super()._handle_message_event_data(data)
 

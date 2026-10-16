@@ -22,3 +22,13 @@ def test_registration_covers_the_bundled_entry():
     drifted = sorted(k for k, v in bundled.items() if not callable(v) and ctx.kwargs[k] != v)
     assert not drifted, f"static fields differ from the bundled entry: {drifted} (update _STATIC_ENTRY)"
     assert ctx.kwargs["name"] == "feishu" and callable(ctx.kwargs["adapter_factory"])
+
+
+def test_basic_card_adapter_survives_missing_optional_identity_seam(monkeypatch):
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import BasePlatformAdapter
+    from feishu_cardkit.adapter import CardkitFeishuAdapter
+    monkeypatch.delattr(BasePlatformAdapter, "_source_session_key", raising=False)
+    adapter = plugin.build_adapter(PlatformConfig(enabled=True, extra={"streaming_card": True}))
+    assert isinstance(adapter, CardkitFeishuAdapter)
+    assert adapter._streaming_card is True and adapter._stop_button is False

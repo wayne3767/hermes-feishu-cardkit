@@ -29,7 +29,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from gateway.platforms.base import MEDIA_TAG_CLEANUP_RE, BasePlatformAdapter
 from .math_text import convert_math
 
 ANSWER_ELEMENT_ID = "hermes_answer"
@@ -44,6 +43,9 @@ STOP_ACTION = {"hermes_cardkit": "stop"}
 MARKDOWN_TABLE_ROWS = 5
 TABLE_PAGE_SIZE = 10
 MAX_TABLE_COMPONENTS = 5
+# Limits for conversion, not truncation: tables outside them stay complete Markdown.
+MAX_TABLE_COLUMNS = 50
+MAX_TABLE_CELL_CHARS = 1200
 DEFAULT_CARD_TITLE = "Hermes Agent"
 SEED_PLACEHOLDER = "…"
 # Feishu rejects card JSON above 30 KB.  CARD_JSON_MAX_BYTES caps the serialized card actually
@@ -58,7 +60,14 @@ TIMELINE_SLIM_BYTES = 1500
 ACTIVITY_MAX_CHARS = 60
 
 PHASE_RUNNING, PHASE_DONE, PHASE_STOPPED = "running", "done", "stopped"
-_PHASE_TEMPLATE = {PHASE_DONE: "green", PHASE_STOPPED: "grey", PHASE_RUNNING: "blue"}
+PHASE_WAITING_APPROVAL, PHASE_WAITING_INPUT = "waiting_approval", "waiting_input"
+PHASE_BLOCKED, PHASE_TIMEOUT, PHASE_FAILED, PHASE_UNKNOWN = "blocked", "timeout", "failed", "unknown"
+PHASE_SEGMENT = "segment"
+ACTIVE_PHASES = {PHASE_RUNNING, PHASE_WAITING_APPROVAL, PHASE_WAITING_INPUT, PHASE_UNKNOWN}
+_PHASE_TEMPLATE = {PHASE_DONE: "green", PHASE_STOPPED: "grey", PHASE_RUNNING: "blue",
+                   PHASE_WAITING_APPROVAL: "orange", PHASE_WAITING_INPUT: "orange",
+                   PHASE_BLOCKED: "orange", PHASE_TIMEOUT: "orange", PHASE_FAILED: "red", PHASE_UNKNOWN: "grey",
+                   PHASE_SEGMENT: "blue"}
 
 
 @dataclass(frozen=True)
@@ -96,6 +105,16 @@ _LABELS = {"zh": ZH, "en": EN}
 def labels_for(domain: str, locale: str = "") -> Labels:
     """``locale`` (zh / en) wins; otherwise the Lark international domain gets English."""
     return _LABELS.get((locale or "").lower()) or (EN if (domain or "").lower() == "lark" else ZH)
+
+
+def phase_label(phase: str, labels: Labels = ZH) -> str:
+    known = {PHASE_RUNNING: labels.running, PHASE_DONE: labels.done, PHASE_STOPPED: labels.stopped}
+    extra = {PHASE_WAITING_APPROVAL: ("等待确认", "Awaiting approval"),
+             PHASE_WAITING_INPUT: ("等待输入", "Awaiting input"), PHASE_BLOCKED: ("已拒绝", "Declined"),
+             PHASE_TIMEOUT: ("已超时", "Timed out"), PHASE_FAILED: ("执行失败", "Failed"),
+             PHASE_SEGMENT: ("本段已结束", "Segment ended"),
+             PHASE_UNKNOWN: ("暂未收到进展", "No recent progress")}
+    return known.get(phase) or extra.get(phase, extra[PHASE_UNKNOWN])[0 if labels is ZH else 1]
 
 
 _FIGURE_BLOCK_RE = re.compile(r"^!\[[^\]]*\]\([^)]+\)\n<font color=\"grey\">(?:图\d+|Figure \d+)　.*</font>$")
@@ -197,8 +216,8 @@ def render_answer(markdown: str) -> str:
 
 def summary_for(markdown: str, phase: str, labels: Labels = ZH) -> str:
     """Notification preview: first answer line once done, a status word otherwise."""
-    if phase == PHASE_RUNNING:
-        return labels.generating
+    if phase != PHASE_DONE:
+        return labels.generating if phase == PHASE_RUNNING else phase_label(phase, labels)
     prose = (line.strip() for line in markdown.splitlines()
              if line.strip() and not line.lstrip().startswith(("![", "<font", "|", "```")))
     first = next(prose, "")
@@ -220,20 +239,42 @@ def render_timeline(lines: List[str], labels: Labels = ZH, *, max_lines: int = T
     return "\n".join(kept)
 
 
-def timeline_title(tool_count: int, labels: Labels = ZH) -> str:
-    prefix = "思考与工具" if labels is ZH else "Thinking & tools"
+def timeline_title(tool_count: int, labels: Labels = ZH, reading_preset: str = "classic") -> str:
+    prefix = ("执行过程" if labels is ZH else "Execution") if reading_preset == "task" else (
+        "思考与工具" if labels is ZH else "Thinking & tools")
     return f"{prefix} · {labels.tools.format(n=tool_count)}"
 
 
 def render_footer(*, phase: str, tool_count: int, elapsed: float, model: str = "", activity: str = "",
-                  labels: Labels = ZH) -> str:
+                  labels: Labels = ZH, metrics: Optional[Dict[str, Any]] = None) -> str:
     tools = labels.tools.format(n=tool_count)
     if phase == PHASE_DONE:
         parts = [f"✅ {labels.done}", format_duration(elapsed)] + ([model] if model else []) + [tools]
     elif phase == PHASE_STOPPED:
         parts = [f"⏹ {labels.stopped}", format_duration(elapsed)]
-    else:
+    elif phase == PHASE_RUNNING:
         parts = [f"⏳ {labels.running}", tools] + ([activity] if activity else [])
+    else:
+        parts = [phase_label(phase, labels), format_duration(elapsed), tools]
+    if metrics:
+        # Metrics already belong to a verified turn. Missing values stay absent; never show
+        # the configured default model as evidence of which provider served this request.
+        actual = metrics.get("model")
+        if isinstance(actual, str) and actual and actual not in parts:
+            parts.append(actual)
+        provider = metrics.get("provider")
+        if isinstance(provider, str) and provider:
+            parts.append(provider)
+        tokens = metrics.get("tokens") or {}
+        for key, arrow in (("input_tokens", "↑"), ("output_tokens", "↓")):
+            value = tokens.get(key)
+            if type(value) is int and value >= 0:
+                parts.append(f"{arrow}{value:,}")
+        context = metrics.get("context") or {}
+        used, limit = context.get("used_tokens"), context.get("max_tokens")
+        if type(used) is int and used >= 0 and type(limit) is int and limit > 0:
+            name = "上下文" if labels is ZH else "Context"
+            parts.append(f"{name} {used:,}/{limit:,} ({used / limit:.0%})")
     return " · ".join(parts)
 
 
@@ -268,6 +309,7 @@ def place_images(raw: str, items: List[ImageItem], render: MarkdownRenderer, lab
     stood: tags → placeholders, ``render`` (math etc.) on the cleaned text, placeholders → figure
     blocks.  A ``图N：…`` line right after a tag becomes that figure's title.  Files the raw text
     never mentioned are appended.  None when no delivered file is referenced at all."""
+    from gateway.platforms.base import MEDIA_TAG_CLEANUP_RE, BasePlatformAdapter
     by_name = {os.path.basename(path): index for index, (path, _key, _alt) in enumerate(items)}
     numbers: Dict[int, int] = {}  # item index → figure number
     explicit: Dict[int, str] = {}
@@ -318,21 +360,86 @@ def _is_table(lines: List[str], start: int) -> bool:
 
 
 def _cells(line: str) -> List[str]:
-    """Cells of one markdown table row (``\\|`` stays a literal pipe)."""
+    """Split cells without treating an escaped pipe as a column boundary.
+
+    An even number of backslashes before a pipe leaves the pipe unescaped. Only the
+    slash used to escape a literal pipe is removed; other Markdown escapes survive.
+    """
     body = line.strip()
-    body = body[1:] if body.startswith("|") else body
-    body = body[:-1] if body.endswith("|") and not body.endswith("\\|") else body
-    return [cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", body)]
+    cells: List[str] = []
+    cell: List[str] = []
+    trailing_boundary = False
+    for char in body:
+        trailing_boundary = False
+        if char == "|":
+            backslashes = 0
+            for previous in reversed(cell):
+                if previous != "\\":
+                    break
+                backslashes += 1
+            if backslashes % 2:
+                cell.pop()
+            else:
+                cells.append("".join(cell).strip())
+                cell.clear()
+                trailing_boundary = True
+                continue
+        cell.append(char)
+    cells.append("".join(cell).strip())
+    if body.startswith("|"):
+        cells.pop(0)
+    if trailing_boundary:
+        cells.pop()
+    return cells
 
 
 _NUMBER_RE = re.compile(r"^[-+−]?[\d,，]*\.?\d+\s*%?$|^[—–-]$|^$")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
 
 
-def table_component(lines: List[str]) -> Dict[str, Any]:
+def _table_column_widths(header: List[str], rows: List[List[str]]) -> List[str]:
+    """Allocate 100 integer percentage points, favoring columns with longer text.
+
+    Reserve some width for every column, then distribute the remaining points by
+    content weight per allocated point. The average represents typical rows and
+    half of the longest value gives occasional long explanations some extra room.
+    """
+    count = len(header)
+    if count == 1:
+        return ["100%"]
+    weights = []
+    for i, name in enumerate(header):
+        lengths = [len(row[i]) if i < len(row) else 0 for row in rows]
+        average = sum(lengths) / max(1, len(lengths))
+        weights.append(min(80, max(6, len(name), average, max(lengths, default=0) / 2)))
+    widths = [min(12, max(1, 50 // count))] * count
+    for _ in range(100 - sum(widths)):
+        eligible = (i for i in range(count) if widths[i] < 70)
+        index = max(eligible, key=lambda i: weights[i] / (widths[i] + 1))
+        widths[index] += 1
+    return [f"{width}%" for width in widths]
+
+
+def table_component(lines: List[str]) -> Optional[Dict[str, Any]]:
     """A markdown table as a Card JSON 2.0 ``table`` component: markdown cells, alignment from the
-    separator row (numeric columns right-aligned by default), ``TABLE_PAGE_SIZE`` rows per page."""
+    separator row (numeric columns right-aligned by default), ``TABLE_PAGE_SIZE`` rows per page.
+
+    Return None when conversion cannot preserve the table, so the caller can retain
+    its original Markdown. Ragged data rows are padded, never sliced to header size.
+    """
+    if len(lines) < 3 or not all(_TABLE_LINE_RE.match(line) for line in lines):
+        return None
     header, rows = _cells(lines[0]), [_cells(line) for line in lines[2:]]
     aligns = _cells(lines[1])
+    if len(aligns) != len(header) or not all(_TABLE_SEPARATOR_CELL_RE.fullmatch(spec) for spec in aligns):
+        return None
+    count = max(len(header), *(len(row) for row in rows))
+    if not 1 <= count <= MAX_TABLE_COLUMNS:
+        return None
+    if any(len(value) > MAX_TABLE_CELL_CHARS for row in [header, *rows] for value in row):
+        return None
+    header += [""] * (count - len(header))
+    widths = _table_column_widths(header, rows)
     columns = []
     for i, name in enumerate(header):
         spec = aligns[i].strip() if i < len(aligns) else ""
@@ -345,10 +452,10 @@ def table_component(lines: List[str]) -> Dict[str, Any]:
         else:
             numeric = rows and all(_NUMBER_RE.match(row[i] if i < len(row) else "") for row in rows)
             align = "right" if numeric else "left"
-        columns.append({"name": f"c{i}", "display_name": name or " ", "data_type": "markdown", "width": "auto",
+        columns.append({"name": f"c{i}", "display_name": name or " ", "data_type": "markdown", "width": widths[i],
                         "horizontal_align": align, "vertical_align": "center"})
     table = {
-        "tag": "table", "page_size": TABLE_PAGE_SIZE, "row_height": "low",
+        "tag": "table", "page_size": TABLE_PAGE_SIZE, "row_height": "auto", "row_max_height": "999px",
         "header_style": {"text_align": "left", "text_size": "normal", "background_style": "grey",
                          "text_color": "default", "bold": True, "lines": 1},
         "columns": columns,
@@ -412,9 +519,11 @@ def layout_answer_elements(markdown: str, labels: Labels = ZH, *, number_tables:
         caption = labels.table.format(n=table_no) + (f"　{title}" if title else "") if number_tables else title
         if caption:
             elements.append({"tag": "markdown", "text_align": "center", "content": f"<font color=\"grey\">{caption}</font>"})
-        if len(table) - 2 > MARKDOWN_TABLE_ROWS and components < MAX_TABLE_COMPONENTS:
+        component = (table_component(table)
+                     if len(table) - 2 > MARKDOWN_TABLE_ROWS and components < MAX_TABLE_COMPONENTS else None)
+        if component is not None:
             components += 1
-            elements.append(table_component(table))
+            elements.append(component)
         else:
             elements.append({"tag": "markdown", "content": "\n".join(table)})
         if tail:
@@ -428,22 +537,24 @@ def layout_answer_elements(markdown: str, labels: Labels = ZH, *, number_tables:
 def build_stream_card(
     *, title: str, markdown: str, timeline_md: str, tool_count: int, footer: str, phase: str, summary: str = "",
     labels: Labels = ZH, streaming: Optional[bool] = None, plain: bool = False, stop_button: bool = False,
+    stop_value: Optional[Dict[str, Any]] = None, timeline_expanded: bool = False,
+    reading_preset: str = "classic", width_mode: str = "default",
 ) -> Dict[str, Any]:
     """Card JSON 2.0 for one turn.  ``markdown`` is the answer exactly as it should show (math and
     images already rendered); streaming mode is on only while ``phase`` is running (``streaming=False``
     keeps it off: a running card past CardKit's streaming window).  ``plain`` keeps a finished
     answer in one element instead of the figure / table layout (the slim fallback card)."""
-    subtitle = {PHASE_DONE: labels.done, PHASE_STOPPED: labels.stopped}.get(phase, labels.running)
-    template = _PHASE_TEMPLATE[phase]
-    running = phase == PHASE_RUNNING
-    streaming = running and streaming is not False
+    subtitle = phase_label(phase, labels)
+    template = _PHASE_TEMPLATE.get(phase, "grey")
+    running = phase in ACTIVE_PHASES
+    streaming = phase == PHASE_RUNNING and streaming is not False
     body = markdown or SEED_PLACEHOLDER
     elements = ([{"tag": "markdown", "element_id": ANSWER_ELEMENT_ID, "content": body}] if running or plain
                 else layout_answer_elements(body, labels))
     if running or tool_count:
         elements.append({
-            "tag": "collapsible_panel", "element_id": TIMELINE_PANEL_ID, "expanded": False,
-            "header": {"title": {"tag": "plain_text", "content": timeline_title(tool_count, labels)},
+            "tag": "collapsible_panel", "element_id": TIMELINE_PANEL_ID, "expanded": timeline_expanded,
+            "header": {"title": {"tag": "plain_text", "content": timeline_title(tool_count, labels, reading_preset)},
                        "vertical_align": "center", "padding": "4px 0px 4px 8px"},
             "border": {"color": "grey", "corner_radius": "8px"},
             "elements": [{"tag": "markdown", "element_id": TIMELINE_ELEMENT_ID, "content": timeline_md}],
@@ -453,8 +564,10 @@ def build_stream_card(
     if running and stop_button:
         elements.append({"tag": "button", "element_id": STOP_BUTTON_ID, "type": "default", "size": "small",
                          "text": {"tag": "plain_text", "content": labels.stop_button},
-                         "behaviors": [{"type": "callback", "value": dict(STOP_ACTION)}]})
+                         "behaviors": [{"type": "callback", "value": dict(stop_value or STOP_ACTION)}]})
     config: Dict[str, Any] = {"streaming_mode": streaming, "update_multi": True}
+    if width_mode in {"compact", "fill"}:
+        config["width_mode"] = width_mode
     if streaming:
         config["streaming_config"] = {"print_frequency_ms": {"default": 50}, "print_step": {"default": 2}, "print_strategy": "fast"}
     if summary:
@@ -468,13 +581,14 @@ def build_stream_card(
     }
 
 
-def timeline_update_actions(tool_count: int, timeline_md: str, footer: str, labels: Labels = ZH) -> List[Dict[str, Any]]:
+def timeline_update_actions(tool_count: int, timeline_md: str, footer: str, labels: Labels = ZH,
+                            reading_preset: str = "classic") -> List[Dict[str, Any]]:
     """CardKit batch actions refreshing the panel title, its body and the footer in one call."""
     def _partial(element_id: str, partial: Dict[str, Any]) -> Dict[str, Any]:
         return {"action": "partial_update_element", "params": {"element_id": element_id, "partial_element": partial}}
     return [
         _partial(TIMELINE_ELEMENT_ID, {"content": timeline_md}),
-        _partial(TIMELINE_PANEL_ID, {"header": {"title": {"tag": "plain_text", "content": timeline_title(tool_count, labels)}}}),
+        _partial(TIMELINE_PANEL_ID, {"header": {"title": {"tag": "plain_text", "content": timeline_title(tool_count, labels, reading_preset)}}}),
         _partial(FOOTER_ELEMENT_ID, {"content": footer}),
     ]
 
