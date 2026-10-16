@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -250,7 +249,8 @@ def test_real_drain_handoff_reusing_guard_rejects_old_stream():
 
 def test_default_transport_clarify_worker_keeps_routed_profile_on_gateway_loop(monkeypatch):
     """Exercise the real TurnRunner scheduler, not a mocked ambient scope."""
-    from types import SimpleNamespace
+    from types import ModuleType, SimpleNamespace
+    from agent.async_utils import safe_schedule_threadsafe
     from gateway.run_turn_runner import TurnRunner
     from gateway.session_identity import RoutingIdentity
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
@@ -294,7 +294,11 @@ def test_default_transport_clarify_worker_keeps_routed_profile_on_gateway_loop(m
         finally:
             reset_hermes_home_override(token)
             clarify.clear_session(key)
-    # gateway.run's import loads optional environment defaults; do not leak those into
-    # subsequent tests or let the real user's allowlist alter synthetic callback fixtures.
-    with patch.dict(os.environ):
+    # The production module re-exports this exact scheduler. Importing that entry
+    # point also activates Hermes's package manager and can exec another Python,
+    # replacing pytest itself. Exercise the real TurnRunner and scheduling helper
+    # without invoking unrelated process startup or reading the user's config.
+    scheduling_exports = ModuleType("gateway.run")
+    scheduling_exports.safe_schedule_threadsafe = safe_schedule_threadsafe
+    with patch.dict("sys.modules", {"gateway.run": scheduling_exports}):
         _run(exercise())
