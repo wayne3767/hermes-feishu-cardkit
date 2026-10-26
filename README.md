@@ -21,7 +21,7 @@ Out of the box, Hermes delivers a Feishu/Lark reply as a plain message that gets
 - The footer reads **status · elapsed · decode speed · model**, e.g. "Generating · 45s · 31 tok/s · deepseek-v4.1-flash". The running figure is a windowed estimate from the text landed so far and disappears when no text has arrived for a while; each finished API call replaces it with the official output tokens over streaming time, and a finished card shows the per-turn measured rate. The model is known before the first token and is replaced by the model the response actually served once that event arrives; per-turn tokens and context usage are one opt-in setting.
 - Inline LaTeX becomes Unicode math text (`\delta_p` → δₚ, `\frac{a}{b}` → (a)/(b)); display formulas are typeset into images when `matplotlib` is available.
 - Images the model attaches (`MEDIA:` lines) are placed inside the card where the model put them, with centred **"Figure N · title"** captions; markdown tables get a **"Table N · title"** heading, and tables longer than 5 rows become paged table components (10 rows per page) once the answer is done.
-- A **Stop** button is bound to the original initiator, session and topic; unknown or expired cards have no usable control.
+- The tool line at the top of the card (**Thinking & tools · N tool calls**) carries an **Expand / Collapse** button. The chain is a real card element that only exists while expanded, and the plugin owns that state, so it can always be collapsed again — even while the answer is still streaming, where a `collapsible_panel`'s own toggle got stuck open. The card no longer renders a Stop button; send `/stop` (or use the platform's own control) instead.
 - Inline LaTeX still being typed is held back until it closes, so raw `$\frac{…` never flashes in the card.
 - Cron deliveries (scheduled job output) go out as **one static card**: the first line becomes the header (a trailing `(…)` the subtitle), the rest keeps its headings and tables, Hermes's English "Cronjob Response" wrapper is removed and the job name goes into a scheduled-task footer; the header is violet (chat cards keep blue / green / grey for their progress) and red on failures.
 - Every step degrades to Hermes's normal delivery on failure (missing CardKit scope, upload error, oversized answer, an incompatible Hermes build). Text and images are never lost.
@@ -53,7 +53,6 @@ Optional: display formulas are typeset as images when the `matplotlib` package i
 | `FEISHU_CARD_LOCALE` / `platforms.feishu.card_locale` | empty | Card wording `zh` / `en`; default follows `FEISHU_DOMAIN` |
 | `FEISHU_CRON_CARD` / `platforms.feishu.cron_card` | `true` | `false` sends cron output as ordinary messages again |
 | `FEISHU_CRON_CARD_TEMPLATE` / `platforms.feishu.cron_card_template` | `violet` | Header colour of cron cards (a Feishu card template name); failures stay `red` |
-| `FEISHU_CARD_STOP_BUTTON` / `platforms.feishu.card_stop_button` | `true` | Stop button on generating cards |
 | `FEISHU_CARD_FOOTER_USAGE` / `platforms.feishu.card_footer_usage` | `false` | `true` adds provider, per-turn input/output tokens and context usage to the footer |
 | `FEISHU_CARD_READING_PRESET` / `platforms.feishu.card_reading_preset` | `classic` | `classic`, `task` or `detailed` |
 | `FEISHU_CARD_TIMELINE_EXPANDED` / `platforms.feishu.card_timeline_expanded` | preset | Explicit timeline expansion override |
@@ -76,7 +75,7 @@ The card can embed figures and caption them, but whether the model draws anythin
 ### Known limits
 
 - Feishu pages markdown tables at 5 data rows; longer tables become table components (10 rows per page) in the finished card, at most 5 per card; while generating they show as markdown.
-- Stop retains the exact original source, including topic and routed profile, the processing task/guard and the official agent-turn identity. It is revalidated inside the bundled chat lock. Ambiguous topic anchors, ended turns and missing observations hide or reject the control; the ordinary `/stop` command remains available.
+- Stop is the ordinary `/stop` command: the card no longer carries a button, so there is no click authority to bind. Messages already in chats keep their old button and the callback stays for them.
 - Subscripts without a Unicode form are written run-on (`$A_d$` → Ad, `$V_{daf}$` → Vdaf), as plain-text coal and chemistry notation does.
 - Matrices, `cases`, multi-line alignment environments and formulas containing CJK text are not typeset as images; they fall back to Unicode.
 - Card JSON is capped at 30 KB; the whole card is measured, tool lines give way first, and an oversized answer shows its head in the card while the full text goes out as ordinary messages. While streaming, an oversized answer shows its newest paragraphs.
@@ -113,7 +112,7 @@ Hermes 的飞书通道默认把回复作为普通消息反复编辑。这个插�
 - 标题栏只显示状态（思考中 / 调用工具中 / 生成中 / 已完成等），不再重复 bot 名称��
 - 行内 LaTeX 公式转成 Unicode 数学文本；块级公式在装了 matplotlib 时排版成图片
 - 模型附带的图片（`MEDIA:` 行）嵌进卡片正文对应位置，带居中的"图N 标题"图注；表格上方加"表N 标题"表题；超过 5 行的表格在完成后改为分页表格组件（每页 10 行）
-- "停止生成"按钮绑定原发起者、会话和话题；来源不明、越权或过期的点击不能控制其他回合
+- 正文最前那一行「思考与工具 · N 次工具调用」带一个**展开 / 收起**按钮：调用链只在展开时作为真实元素存在，状态由插件保存，所以一定收得回来（流式更新时原生折叠面板的展开状态会卡住）。卡片不再渲染"停止生成"按钮，需要时发 `/stop`
 - 生成中尚未闭合的行内公式先不显示，不会闪出原始 LaTeX
 - 定时任务（cron）的输出以**一张静态卡片**发出：首行作标题（末尾括号内容作副标题），其余保留标题层级和表格，Hermes 默认加的英文外壳（"Cronjob Response…"）会去掉，任务名放进"定时任务"页脚；标题栏为紫色（聊天卡片的蓝 / 绿 / 灰表示进度，两者分开），标题含"失败"等字样时为红色
 - 任一环节失败都退回 Hermes 原有的投递方式，文字和图片不会丢
@@ -143,7 +142,6 @@ hermes gateway restart
 | `FEISHU_CARD_LOCALE` / `platforms.feishu.card_locale` | 空 | 卡片文案语言 `zh` / `en`；默认 feishu 域中文、lark 域英文 |
 | `FEISHU_CRON_CARD` / `platforms.feishu.cron_card` | `true` | 设为 `false` 时定时任务输出恢复为普通消息 |
 | `FEISHU_CRON_CARD_TEMPLATE` / `platforms.feishu.cron_card_template` | `violet` | 定时任务卡片标题栏颜色（飞书卡片模板名）；失败始终为 `red` |
-| `FEISHU_CARD_STOP_BUTTON` / `platforms.feishu.card_stop_button` | `true` | 生成中卡片的"停止生成"按钮 |
 | `FEISHU_CARD_FOOTER_USAGE` / `platforms.feishu.card_footer_usage` | `false` | 设为 `true` 时页脚额外显示供应方、本轮输入/输出 token 与上下文占用 |
 | `FEISHU_CARD_READING_PRESET` / `platforms.feishu.card_reading_preset` | `classic` | `classic` 默认布局、`task` 任务布局、`detailed` 展开过程 |
 | `FEISHU_CARD_TIMELINE_EXPANDED` / `platforms.feishu.card_timeline_expanded` | 随预设 | 显式指定过程面板是否展开 |
@@ -167,7 +165,7 @@ hermes gateway restart
 ### 已知限制
 
 - 飞书 Markdown 表格每页固定 5 行、超出分页；完成后的卡片里，超过 5 行的表格改为表格组件（每页 10 行），一张卡片最多 5 个；生成过程中仍是 Markdown 表格。
-- "停止生成"绑定原始消息的话题、用户、路由 profile、处理任务与官方回合身份，在原生会话锁内再次核验。话题锚点有歧义、原任务已结束或缺少可靠回合记录时隐藏或拒绝控件，文字 `/stop` 仍沿用原流程。
+- 停止一律走 `/stop`：卡片不再提供按钮，因此没有可绑定的点击权限；聊天里遗留的旧卡片按钮仍沿用原回调，不影响新卡片。
 - 没有 Unicode 下标字形的下标按连写处理（`$A_d$` → Ad，`$V_{daf}$` → Vdaf），与煤质、化学的纯文本写法一致。
 - 矩阵、分段函数、多行对齐环境和含中文的公式不做图片排版，退回 Unicode 文本。
 - 卡片 JSON 上限 30 KB；按整张卡片计量，先压缩工具时间线；仍超长的回答在卡片里显示开头部分，完整内容由 Hermes 按普通消息发出。生成过程中超长时显示最新几段。

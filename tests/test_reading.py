@@ -113,8 +113,12 @@ platforms:
     for phase in preview.PHASES:
         card = json.loads((output / f"{phase}.json").read_text(encoding="utf-8"))
         assert card["schema"] == "2.0" and card["config"]["width_mode"] == "compact"
-        panel = next(element for element in card["body"]["elements"] if element["tag"] == "collapsible_panel")
-        assert panel["expanded"] is False
+        summary = next(element for element in card["body"]["elements"]
+                       if element.get("element_id") == "hermes_timeline")
+        toggle = next(element for element in card["body"]["elements"]
+                      if element.get("element_id") == "hermes_timeline_toggle")
+        assert "2 次工具调用" in summary["content"] and toggle["text"]["content"] == "展开"
+        assert not any(element.get("element_id") == "hermes_timeline_md" for element in card["body"]["elements"])
     assert not any(name.startswith("_cardkit_offline_preview.adapter") for name in sys.modules)
 
 

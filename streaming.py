@@ -53,7 +53,8 @@ from urllib.parse import unquote
 from .card_layout import (
     ACTIVITY_MAX_CHARS, ACTIVE_PHASES, ANSWER_ELEMENT_ID, CARD_JSON_MAX_BYTES, CARD_MAX_BYTES, DEFAULT_CARD_TITLE, PHASE_DONE,
     PHASE_RUNNING, PHASE_STOPPED, PHASE_UNKNOWN, PHASE_WAITING_APPROVAL, PHASE_WAITING_INPUT,
-    PHASE_BLOCKED, PHASE_TIMEOUT, PHASE_FAILED, PHASE_SEGMENT, TIMELINE_ELEMENT_ID, TIMELINE_MAX_BYTES, TIMELINE_MAX_LINES, TIMELINE_SLIM_BYTES,
+    PHASE_BLOCKED, PHASE_TIMEOUT, PHASE_FAILED, PHASE_SEGMENT, TIMELINE_ELEMENT_ID, TIMELINE_MAX_BYTES, TIMELINE_MAX_LINES,
+    TIMELINE_SLIM_BYTES, TIMELINE_SUMMARY_ID, timeline_title,
     TIMELINE_SLIM_LINES, ImageItem, Labels, append_images, build_stream_card, card_json_bytes, clip_markdown_head,
     clip_markdown_tail, estimate_tokens, footer_update_actions, format_speed, json_text_bytes, labels_for, place_images,
     render_answer, render_footer, render_timeline, status_label, summary_for, timeline_update_actions, utf8_len,
@@ -107,6 +108,8 @@ SPEED_MAX_GAP_SECONDS = 10.0  # a longer gap between text frames is tool time, n
 SPEED_AVERAGE_MIN_SECONDS = 0.5
 # The footer (status, elapsed, speed) refreshes at most this often while text streams.
 FOOTER_TICK_SECONDS = 2.0
+# message_id → turn index for the expand/collapse button (cards outlive their turn)
+_TURN_INDEX_MAX = 128
 FORMULA_IMAGE_WAIT_SECONDS = 8.0  # finalize waits this long for in-flight formula uploads
 _THREAD_CACHE_MAX = 512
 _FORMULA_IMAGE_CACHE_MAX = 256
@@ -147,6 +150,7 @@ class StreamCardTurn:
     status_word: str = ""  # last status shown in the header/footer (思考中 / 调用工具中 / 生成中 …)
     header_dirty: bool = False  # the header subtitle (status) needs a full-layout refresh
     footer_at: float = field(default_factory=time.monotonic)  # last footer write (the elapsed ticker)
+    last_markdown: str = ""  # the markdown the card was sealed with (images/formulas already placed)
     speed_samples: "deque[Tuple[float, int]]" = field(default_factory=lambda: deque(maxlen=48))
     speed_tokens: int = 0  # estimated tokens in the answer landed so far
     decode_seconds: float = 0.0  # time spent between frames that grew the answer
@@ -322,6 +326,11 @@ class FeishuStreamingCardMixin:
         if "_stream_cards" in self.__dict__:
             return
         self._stream_cards: Dict[str, StreamCardTurn] = {}  # "<chat>:<turn>" → open card
+        # card_id → whether the tool chain is on screen, and message_id → its turn, so the
+        # expand/collapse button can drive the layout from the server (the panel's own toggle
+        # could not be collapsed again inside a streaming card).
+        self._card_expanded: "OrderedDict[str, bool]" = OrderedDict()
+        self._turn_by_message: "OrderedDict[str, StreamCardTurn]" = OrderedDict()
         self._completed_cards: "OrderedDict[str, CompletedCard]" = OrderedDict()  # card_id → sealed card
         self._idle_sealed: "OrderedDict[str, StreamCardTurn]" = OrderedDict()  # key → idle-sealed turn
         self._observed_segments: "OrderedDict[str, StreamCardTurn]" = OrderedDict()
@@ -497,6 +506,7 @@ class FeishuStreamingCardMixin:
             return None
         turn.card_id, turn.message_id, turn.answer, turn.answer_clipped = card_id, result.message_id or "", answer, clipped
         turn.status_word = self._status(turn, PHASE_RUNNING)  # what the seed card already shows
+        self._remember_card(turn)
         self._note_speed(turn, answer)
         turn.delivery_result = result
         turn.thread_id = thread_id
@@ -562,10 +572,15 @@ class FeishuStreamingCardMixin:
         if timeline_changed:
             labels = self._labels
             footer = self._footer(turn, turn.phase)
-            actions = timeline_update_actions(turn.tool_count, render_timeline(turn.timeline, labels), footer, labels,
-                                              self._reading_settings()["reading_preset"])
+            expanded = self._panel_expanded(turn.card_id)
+            rendered = render_timeline(turn.timeline, labels)
+            actions = timeline_update_actions(turn.tool_count, rendered, footer, labels,
+                                              self._reading_settings()["reading_preset"], expanded=expanded)
             if not await self._batch_update(turn, actions):
-                await self._push_element(turn, TIMELINE_ELEMENT_ID, render_timeline(turn.timeline, labels))
+                await self._push_element(turn, TIMELINE_SUMMARY_ID,
+                                         timeline_title(turn.tool_count, labels))
+                if expanded:
+                    await self._push_element(turn, TIMELINE_ELEMENT_ID, rendered)
             else:
                 turn.footer_dirty = False
                 turn.footer_at = time.monotonic()
@@ -636,6 +651,7 @@ class FeishuStreamingCardMixin:
         await self._await_formula_images(turn, final)
         shown, markdown = await self._seal_final(turn, phase, self._render_markdown(final), render_answer(final))
         turn.answer = final
+        turn.last_markdown = markdown
         await self._track_closed_segment(turn)
         if shown:
             if not turn.segment_finalized:
@@ -711,6 +727,7 @@ class FeishuStreamingCardMixin:
             return False
         if not await self._replace(done.turn, card):
             return False
+        done.turn.last_markdown = markdown  # a later tool-chain toggle must keep the images
         self._completed_cards.pop(done.turn.card_id, None)
         logger.info("[Feishu] %d image(s) embedded into streaming card %s (%s)",
                     len(items), done.turn.card_id, "positioned" if raw else "appended")
@@ -918,16 +935,58 @@ class FeishuStreamingCardMixin:
         labels = self._labels
         if turn.segment_finalized and phase in {PHASE_RUNNING, PHASE_DONE}:
             phase = PHASE_SEGMENT
+        settings = self._reading_settings()
+        settings["timeline_expanded"] = self._panel_expanded(turn.card_id)  # per card, server-owned
         return build_stream_card(
             title=str(getattr(self, "_bot_name", "") or "").strip() or DEFAULT_CARD_TITLE, markdown=markdown,
             timeline_md=render_timeline(turn.timeline, labels, max_lines=timeline_lines, max_bytes=timeline_bytes),
             tool_count=turn.tool_count, footer=self._footer(turn, phase), phase=phase,
             status=self._status(turn, phase),
             summary=summary_for(markdown, phase, labels), labels=labels, streaming=streaming, plain=plain,
-            stop_button=not turn.segment_finalized and bool(getattr(self, "_stop_button", False)) and bool(
-                getattr(self, "_can_stop_card", lambda _turn: False)(turn)),
-            **self._reading_settings(),
+            **settings,
         )
+
+    def _remember_card(self, turn: StreamCardTurn) -> None:
+        """Index a card by its message id and seed its tool-chain state from the reading preset."""
+        if not turn.card_id:
+            return
+        self._card_expanded.setdefault(turn.card_id, bool(self._reading_settings()["timeline_expanded"]))
+        if turn.message_id:
+            self._turn_by_message[turn.message_id] = turn
+            self._turn_by_message.move_to_end(turn.message_id)
+        while len(self._turn_by_message) > _TURN_INDEX_MAX:
+            self._turn_by_message.popitem(last=False)
+        while len(self._card_expanded) > _TURN_INDEX_MAX:
+            self._card_expanded.popitem(last=False)
+
+    def _panel_expanded(self, card_id: str) -> bool:
+        default = bool(self._reading_settings()["timeline_expanded"])
+        return bool(self._card_expanded.get(card_id, default))
+
+    async def apply_timeline_toggle(self, message_id: str) -> bool:
+        """Flip the tool chain for the card behind ``message_id`` and repaint that card once.
+
+        The state lives here, not in the client, so the card looks the same after every later
+        update (streaming updates, seals, attachments) and a second click always collapses it.
+        """
+        turn = self._turn_by_message.get(message_id)
+        if turn is None:
+            return False
+        self._card_expanded[turn.card_id] = not self._panel_expanded(turn.card_id)
+        try:
+            async with turn.write_lock:
+                streaming = turn.phase == PHASE_RUNNING and not turn.streaming_closed
+                if streaming:
+                    view = self._answer_view(turn, turn.answer)[0]
+                else:
+                    view = turn.last_markdown or self._render_markdown(turn.answer)
+                card, _ = self._fit_card(turn, turn.phase, view, streaming=streaming)
+                if await self._replace(turn, card, level=logging.INFO):
+                    turn.footer_dirty = turn.header_dirty = False
+                    return True
+        except Exception:
+            logger.debug("Tool-chain toggle failed for card %s", turn.card_id, exc_info=True)
+        return False
 
     def _reading_settings(self) -> Dict[str, Any]:
         from .reading import resolve_reading

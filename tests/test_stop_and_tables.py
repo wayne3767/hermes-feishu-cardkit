@@ -60,22 +60,19 @@ class TestTableComponents:
 
 
 class TestStopButton:
-    def test_only_running_cards_carry_the_button(self):
-        kw = dict(title="T", markdown="x", timeline_md="", tool_count=0, footer="f", stop_button=True)
-        running = cl.build_stream_card(phase=cl.PHASE_RUNNING, **kw)
-        button = _elements(running)[cl.STOP_BUTTON_ID]
-        assert button["tag"] == "button" and button["text"]["content"] == "停止生成"
-        assert button["behaviors"] == [{"type": "callback", "value": cl.STOP_ACTION}]
-        for phase in (cl.PHASE_DONE, cl.PHASE_STOPPED):
-            assert cl.STOP_BUTTON_ID not in _elements(cl.build_stream_card(phase=phase, **kw))
-        assert cl.STOP_BUTTON_ID not in _elements(cl.build_stream_card(phase=cl.PHASE_RUNNING, **{**kw, "stop_button": False}))
+    """The stop button was removed on purpose (0.7.0); the tool-chain toggle is the only card
+    control left. The callback stays so buttons already sitting in chats still work."""
 
-    def test_streaming_card_shows_button_until_sealed(self):
+    def test_no_phase_renders_a_stop_button(self):
+        kw = dict(title="T", markdown="x", timeline_md="", tool_count=0, footer="f")
+        for phase in (cl.PHASE_RUNNING, cl.PHASE_DONE, cl.PHASE_STOPPED,
+                      cl.PHASE_WAITING_APPROVAL, cl.PHASE_FAILED, cl.PHASE_SEGMENT):
+            assert cl.STOP_BUTTON_ID not in _elements(cl.build_stream_card(phase=phase, **kw))
+
+    def test_streaming_and_sealed_cards_have_no_stop_button(self):
         adapter, fake = _adapter()
-        adapter._stop_button = True  # presentation only; unsupported-runtime gating is tested separately
-        adapter._can_stop_card = lambda turn: True  # binding authorization is covered by test_interactions
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
-        assert cl.STOP_BUTTON_ID in _elements(fake.card_of(fake.named("create")[0]))
+        assert cl.STOP_BUTTON_ID not in _elements(fake.card_of(fake.named("create")[0]))
         _run(adapter.send_stream_frame("完成", chat_id=CHAT, turn_id="t1", finalize=True))
         assert cl.STOP_BUTTON_ID not in _elements(fake.card_of(fake.named("update")[-1]))
 
@@ -119,8 +116,4 @@ class TestStopButton:
         finally:
             Bundled._on_card_action_trigger = original
 
-    def test_setting_turns_it_off(self):
-        from gateway.config import PlatformConfig
-        from feishu_cardkit.adapter import CardkitFeishuAdapter
-        adapter = CardkitFeishuAdapter(PlatformConfig(enabled=True, extra={"card_stop_button": False}))
-        assert adapter._stop_button is False
+

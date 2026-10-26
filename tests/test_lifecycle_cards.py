@@ -115,16 +115,15 @@ def test_interrupt_does_not_mark_other_sessions_in_the_same_chat(monkeypatch):
     _run(scenario())
 
 
-def test_status_labels_are_distinct_and_terminal_buttons_retire():
+def test_status_labels_are_distinct_and_no_card_carries_a_stop_button():
     for phase, label in {"waiting_approval": "等待确认", "waiting_input": "等待输入",
                          "failed": "执行失败", "blocked": "已拒绝", "timeout": "已超时",
                          "unknown": "暂未收到进展"}.items():
         card = cl.build_stream_card(title="T", markdown="body", timeline_md="tool", tool_count=1,
                                     footer=cl.render_footer(phase=phase, tool_count=1, elapsed=2),
-                                    phase=phase, stop_button=True)
+                                    phase=phase)
         assert card["header"]["title"]["content"] == label
-        if phase in {"failed", "blocked", "timeout"}:
-            assert cl.STOP_BUTTON_ID not in _elements(card)
+        assert cl.STOP_BUTTON_ID not in _elements(card), "the stop button was removed on purpose"
 
 
 def test_metrics_only_frame_refreshes_footer_without_closing_typewriter(monkeypatch):
@@ -133,12 +132,10 @@ def test_metrics_only_frame_refreshes_footer_without_closing_typewriter(monkeypa
     context = admitted(store)
     adapter, fake = _adapter()
     adapter._footer_usage = True
-    adapter._stop_button = True
-    adapter._can_stop_card = lambda turn: bool(turn.observation_ref) and turn.observation_terminal is False
     async def scenario():
         await adapter.send_stream_frame("begin", chat_id=CHAT, reply_to="in-1", turn_id="consumer")
         seed = fake.card_of(fake.named("create")[-1])
-        assert cl.STOP_BUTTON_ID in _elements(seed)
+        assert cl.STOP_BUTTON_ID not in _elements(seed)
         assert seed["config"]["streaming_mode"] is True
         turn = adapter._stream_cards[f"{CHAT}:consumer"]
         assert not turn.dirty and not turn.controls_dirty, "the seed already includes its known controls"
@@ -155,16 +152,12 @@ def test_metrics_only_frame_refreshes_footer_without_closing_typewriter(monkeypa
 
 @pytest.mark.parametrize("driver", ["frame", "watchdog"])
 @pytest.mark.parametrize("fail_first", [False, True])
-def test_late_observation_adds_stop_and_retries_without_closing_typewriter(monkeypatch, driver, fail_first):
+def test_late_observation_refreshes_without_closing_typewriter(monkeypatch, driver, fail_first):
     from test_streaming_card import _fail
     store = lifecycle.ObservationStore()
     monkeypatch.setattr(lifecycle, "OBSERVATIONS", store)
     monkeypatch.setattr(fs, "_WATCHDOG_POLL_SECONDS", 60)
     adapter, fake = _adapter()
-    adapter._stop_button = True
-    # This test owns only the layout pipeline. Exact task/guard ownership is tested
-    # by the Stop integration suite; model the moment its official proof arrives.
-    adapter._can_stop_card = lambda turn: bool(turn.observation_ref) and turn.observation_terminal is False
 
     async def scenario():
         key = f"{CHAT}:consumer"
@@ -195,7 +188,7 @@ def test_late_observation_adds_stop_and_retries_without_closing_typewriter(monke
         assert len(fake.named("update")) == (2 if fail_first else 1)
         for request in fake.named("update"):
             card = fake.card_of(request)
-            assert cl.STOP_BUTTON_ID in _elements(card)
+            assert cl.STOP_BUTTON_ID not in _elements(card)
             assert card["config"]["streaming_mode"] is True
         before = len(fake.named("update"))
         await adapter.send_stream_frame("begin continued", chat_id=CHAT, turn_id="consumer")

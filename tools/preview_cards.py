@@ -136,7 +136,7 @@ def write_previews(output: Path, *, config_path: Path | None = None) -> dict[str
                                   speed=cl.format_speed(31.4))
         cards[phase] = cl.build_stream_card(
             title="Hermes · 离线示例", markdown=answer, timeline_md=timeline,
-            tool_count=2, footer=footer, phase=phase, status=status, stop_button=True, **resolved["values"],
+            tool_count=2, footer=footer, phase=phase, status=status, **resolved["values"],
         )
     scope = "file/next-load" if config_path else "defaults/preview"
     manifest = {"mode": "offline-preview", "configuration_scope": f"{scope}; not running gateway values",

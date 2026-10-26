@@ -40,7 +40,17 @@ TIMELINE_ELEMENT_ID = "hermes_timeline_md"
 FOOTER_ELEMENT_ID = "hermes_footer"
 STOP_BUTTON_ID = "hermes_stop"
 # Card-action value of the stop button; the adapter turns a click into "/stop" for the clicker.
+# Cards no longer render the button (0.7.0); the callback stays for buttons already in chats.
 STOP_ACTION = {"hermes_cardkit": "stop"}
+# One-line tool summary plus its expand/collapse button. The chain is a separate element that
+# exists only while expanded: a collapsible_panel's own toggle cannot be driven from the server,
+# and in a streaming card the client's toggle could not be collapsed again, so the state lives in
+# the plugin and every update renders it (a full card update on a click).
+TIMELINE_SUMMARY_ID = "hermes_timeline"
+TIMELINE_TOGGLE_ID = "hermes_timeline_toggle"
+TIMELINE_ACTION = {"hermes_cardkit": "timeline"}
+# Previous name of the summary element; kept so existing helpers/tests keep a stable id.
+TIMELINE_PANEL_ID = TIMELINE_SUMMARY_ID
 # Markdown tables show 5 data rows per page (fixed); longer ones become table components (up to
 # 10 rows per page) in the completed layout.  Feishu allows 5 table components per card.
 MARKDOWN_TABLE_ROWS = 5
@@ -91,21 +101,26 @@ class Labels:
     tool_only: str  # answer placeholder for a tool-only turn
     clipped_head: str  # heads a running answer that shows only its newest paragraphs
     scheduled: str  # card title / footer word for cron deliveries
-    stop_button: str  # button on a generating card
-    stop_toast: str  # toast after the stop button is clicked
-    stop_failed: str  # toast when the click cannot be turned into /stop
+    stop_button: str  # legacy: cards no longer render it, the callback stays
+    stop_toast: str  # toast after a legacy stop button is clicked
+    stop_failed: str  # toast when a legacy stop click cannot be turned into /stop
+    timeline_expand: str  # button that shows the tool chain
+    timeline_collapse: str  # button that hides it again
+    toggle_failed: str  # toast when the toggle cannot be applied
 
 
 ZH = Labels(running="生成中", done="已完成", stopped="已停止", thinking="思考中", tooling="调用工具中",
             generating="生成中…", timeline_empty="尚无工具调用",
             omitted="… 已省略 {n} 行", tools="{n} 次工具调用", figure="图{n}", table="表{n}", picture="图片", tool_only="✅",
             clipped_head="…（前文较长已省略，完整内容在生成结束后给出）", scheduled="定时任务",
-            stop_button="停止生成", stop_toast="已请求停止", stop_failed="未能停止，请发送 /stop")
+            stop_button="停止生成", stop_toast="已请求停止", stop_failed="未能停止，请发送 /stop",
+            timeline_expand="展开", timeline_collapse="收起", toggle_failed="暂时无法切换，请稍后重试")
 EN = Labels(running="Generating", done="Done", stopped="Stopped", thinking="Thinking", tooling="Working",
             generating="Generating…", timeline_empty="No tool calls yet",
             omitted="… {n} earlier lines omitted", tools="{n} tool calls", figure="Figure {n}", table="Table {n}", picture="Image",
             tool_only="✅", clipped_head="… (earlier text omitted; the full answer follows when done)", scheduled="Scheduled task",
-            stop_button="Stop", stop_toast="Stopping…", stop_failed="Could not stop; send /stop")
+            stop_button="Stop", stop_toast="Stopping…", stop_failed="Could not stop; send /stop",
+            timeline_expand="Expand", timeline_collapse="Collapse", toggle_failed="Could not toggle; try again")
 _LABELS = {"zh": ZH, "en": EN}
 
 
@@ -602,8 +617,8 @@ def layout_answer_elements(markdown: str, labels: Labels = ZH, *, number_tables:
 
 def build_stream_card(
     *, title: str, markdown: str, timeline_md: str, tool_count: int, footer: str, phase: str, summary: str = "",
-    labels: Labels = ZH, streaming: Optional[bool] = None, plain: bool = False, stop_button: bool = False,
-    stop_value: Optional[Dict[str, Any]] = None, timeline_expanded: bool = False,
+    labels: Labels = ZH, streaming: Optional[bool] = None, plain: bool = False,
+    timeline_expanded: bool = False, toggle_value: Optional[Dict[str, Any]] = None,
     reading_preset: str = "classic", width_mode: str = "default", status: str = "",
 ) -> Dict[str, Any]:
     """Card JSON 2.0 for one turn.  ``markdown`` is the answer exactly as it should show (math and
@@ -611,10 +626,12 @@ def build_stream_card(
     keeps it off: a running card past CardKit's streaming window).  ``plain`` keeps a finished
     answer in one element instead of the figure / table layout (the slim fallback card).
 
-    The tool panel is the FIRST body element — under the header and above the answer — and stays
-    one line until the reader expands it.  ``status`` overrides the phase word.  The header shows
-    that word alone: the bot name is redundant inside the bot's own chat, so ``title`` is accepted
-    for callers but not rendered."""
+    Tool calls are one line at the top of the body — "思考与工具 · N 次工具调用" plus an
+    expand/collapse button — and the chain itself is a separate element that exists only while
+    ``timeline_expanded`` is true.  The plugin owns that flag (a card action flips it), because a
+    collapsible_panel's own toggle is client-only and could not be collapsed again inside a
+    streaming card.  ``status`` overrides the phase word; the header renders it alone (the bot
+    name is redundant inside its own chat, so ``title`` is accepted but not shown)."""
     subtitle = status or phase_label(phase, labels)
     template = _PHASE_TEMPLATE.get(phase, "grey")
     running = phase in ACTIVE_PHASES
@@ -624,20 +641,19 @@ def build_stream_card(
               else layout_answer_elements(body, labels))
     elements: List[Dict[str, Any]] = []
     if running or tool_count:
+        elements.append({"tag": "markdown", "element_id": TIMELINE_SUMMARY_ID, "text_size": "notation",
+                         "content": timeline_title(tool_count, labels, reading_preset)})
         elements.append({
-            "tag": "collapsible_panel", "element_id": TIMELINE_PANEL_ID, "expanded": timeline_expanded,
-            "header": {"title": {"tag": "plain_text", "content": timeline_title(tool_count, labels, reading_preset)},
-                       "vertical_align": "center", "padding": "4px 0px 4px 8px"},
-            "border": {"color": "grey", "corner_radius": "8px"},
-            "elements": [{"tag": "markdown", "element_id": TIMELINE_ELEMENT_ID, "content": timeline_md}],
+            "tag": "button", "element_id": TIMELINE_TOGGLE_ID, "type": "default", "size": "small",
+            "text": {"tag": "plain_text",
+                     "content": labels.timeline_collapse if timeline_expanded else labels.timeline_expand},
+            "behaviors": [{"type": "callback", "value": dict(toggle_value or TIMELINE_ACTION)}],
         })
+        if timeline_expanded:
+            elements.append({"tag": "markdown", "element_id": TIMELINE_ELEMENT_ID, "content": timeline_md})
     elements.extend(answer)
     elements.append({"tag": "hr"})
     elements.append({"tag": "markdown", "element_id": FOOTER_ELEMENT_ID, "text_size": "notation", "content": footer})
-    if running and stop_button:
-        elements.append({"tag": "button", "element_id": STOP_BUTTON_ID, "type": "default", "size": "small",
-                         "text": {"tag": "plain_text", "content": labels.stop_button},
-                         "behaviors": [{"type": "callback", "value": dict(stop_value or STOP_ACTION)}]})
     config: Dict[str, Any] = {"streaming_mode": streaming, "update_multi": True}
     if width_mode in {"compact", "fill"}:
         config["width_mode"] = width_mode
@@ -654,15 +670,17 @@ def build_stream_card(
 
 
 def timeline_update_actions(tool_count: int, timeline_md: str, footer: str, labels: Labels = ZH,
-                            reading_preset: str = "classic") -> List[Dict[str, Any]]:
-    """CardKit batch actions refreshing the panel title, its body and the footer in one call."""
+                            reading_preset: str = "classic", expanded: bool = False) -> List[Dict[str, Any]]:
+    """CardKit batch actions refreshing the tool summary, the chain (when it is on screen) and the
+    footer in one call — the answer element keeps streaming untouched."""
     def _partial(element_id: str, partial: Dict[str, Any]) -> Dict[str, Any]:
         return {"action": "partial_update_element", "params": {"element_id": element_id, "partial_element": partial}}
-    return [
-        _partial(TIMELINE_ELEMENT_ID, {"content": timeline_md}),
-        _partial(TIMELINE_PANEL_ID, {"header": {"title": {"tag": "plain_text", "content": timeline_title(tool_count, labels, reading_preset)}}}),
-        _partial(FOOTER_ELEMENT_ID, {"content": footer}),
-    ]
+    actions = [_partial(TIMELINE_SUMMARY_ID,
+                        {"content": timeline_title(tool_count, labels, reading_preset)})]
+    if expanded:
+        actions.append(_partial(TIMELINE_ELEMENT_ID, {"content": timeline_md}))
+    actions.append(_partial(FOOTER_ELEMENT_ID, {"content": footer}))
+    return actions
 
 
 def footer_update_actions(footer: str) -> List[Dict[str, Any]]:

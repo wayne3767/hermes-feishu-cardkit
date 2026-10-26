@@ -28,7 +28,6 @@ def test_adapter_settings_remain_owned_by_construction_profile(monkeypatch):
     first = adapter.CardkitFeishuAdapter(PlatformConfig(enabled=True, extra={}))
     profile.update(FEISHU_CARD_LOCALE="en", FEISHU_CARD_STOP_BUTTON="true")
     second = adapter.CardkitFeishuAdapter(PlatformConfig(enabled=True, extra={}))
-    assert first._card_locale == "zh" and first._stop_button is False
+    assert first._card_locale == "zh"
     assert second._card_locale == "en"
-    assert second._stop_button is all(hasattr(adapter._bundled.FeishuAdapter, name)
-                                     for name in adapter.STOP_BUTTON_ATTRS)
+    assert not hasattr(second, "_stop_button"), "the stop button was removed in 0.7.0"

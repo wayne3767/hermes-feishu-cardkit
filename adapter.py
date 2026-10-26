@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 
 from plugins.platforms.feishu import adapter as _bundled
 
-from .card_layout import STOP_ACTION
+from .card_layout import STOP_ACTION, TIMELINE_ACTION
 from .cron_card import DEFAULT_TEMPLATE, TEMPLATES, build_cron_card
 from .interaction import CLARIFY_ACTION, CardInteractionMixin
 from .streaming import FeishuStreamingCardMixin
@@ -102,23 +102,24 @@ class CardkitFeishuAdapter(CardInteractionMixin, FeishuStreamingCardMixin, _bund
             logger.warning("[Feishu] unknown cron card template %r; using %s", template, DEFAULT_TEMPLATE)
             template = DEFAULT_TEMPLATE
         self._cron_card_template = template
-        self._stop_button = (_truthy(_setting(extra, "card_stop_button", "FEISHU_CARD_STOP_BUTTON", "true"))
-                             and all(hasattr(_bundled.FeishuAdapter, name) for name in STOP_BUTTON_ATTRS))
         from .reading import resolve_reading
         scoped = getattr(_bundled, "_get_scoped_secret", None)
         self._card_reading = resolve_reading(
             extra, env_get=(lambda name: scoped(name, None)) if callable(scoped) else None)
 
-    # --- Stop button -------------------------------------------------------------------------------
+    # --- Card actions ------------------------------------------------------------------------------
 
     def _on_card_action_trigger(self, data: Any) -> Any:
-        """Stop the clicked card's original session, through the bundled guarded pipeline."""
+        """Route this plugin's card buttons; everything else keeps the bundled handling."""
         event = getattr(data, "event", None)
         value = getattr(getattr(event, "action", None), "value", None) or {}
         if isinstance(value, dict) and value.get("hermes_cardkit") == CLARIFY_ACTION:
             if not self._loop_accepts_callbacks(getattr(self, "_loop", None)):
                 return self._card_response()
             return self._on_clarify_card_action(event, value)
+        if isinstance(value, dict) and value.get("hermes_cardkit") == TIMELINE_ACTION["hermes_cardkit"]:
+            return self._on_timeline_toggle(event)
+        # Cards without the button keep the callback; older messages already in chats still use it.
         if not (isinstance(value, dict) and value.get("hermes_cardkit") == STOP_ACTION["hermes_cardkit"]):
             return super()._on_card_action_trigger(data)
         turn = self._stop_turn_from_event(event)
@@ -132,6 +133,21 @@ class CardkitFeishuAdapter(CardInteractionMixin, FeishuStreamingCardMixin, _bund
         if not self._submit_on_loop(loop, self._dispatch_bound_stop(data, turn)):
             return self._toast("error", self._labels.stop_failed)
         return self._toast("info", self._labels.stop_toast)
+
+    def _on_timeline_toggle(self, event: Any) -> Any:
+        """Expand/collapse the tool chain for the clicked card, then repaint it once."""
+        context = getattr(event, "context", None)
+        message_id = str(getattr(context, "open_message_id", "") or "")
+        loop = getattr(self, "_loop", None)
+        if not message_id or not self._loop_accepts_callbacks(loop):
+            return self._toast("error", self._labels.toggle_failed)
+        if not self._submit_on_loop(loop, self._apply_timeline_toggle(message_id)):
+            return self._toast("error", self._labels.toggle_failed)
+        return self._card_response()
+
+    async def _apply_timeline_toggle(self, message_id: str) -> None:
+        if not await self.apply_timeline_toggle(message_id):
+            logger.info("[Feishu] tool-chain toggle found no live card for message %s", message_id[-6:])
 
     @staticmethod
     def _toast(kind: str, content: str) -> Any:

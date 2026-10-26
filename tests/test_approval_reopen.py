@@ -70,5 +70,5 @@ def test_real_consumer_reopens_a_card_after_the_approval_boundary():
     assert first_sealed["header"]["title"]["content"] == "本段已结束"
     final = fake.card_of(fake.named("update")[-1])
     assert _elements(final)[fs.ANSWER_ELEMENT_ID]["content"] == "第二段正文"
-    assert "审批后继续" in _elements(final)[fs.TIMELINE_ELEMENT_ID]["content"]
+    assert _elements(final)[fs.TIMELINE_SUMMARY_ID]["content"] == "思考与工具 · 1 次工具调用"
     assert str(getattr(adapter, "cardkit_approval_reopen", False)) == "True"

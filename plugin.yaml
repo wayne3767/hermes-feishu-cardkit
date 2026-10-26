@@ -1,7 +1,7 @@
 name: feishu-cardkit
 label: Feishu streaming cards (CardKit)
 kind: platform
-version: 0.6.1
+version: 0.7.0
 description: >
   Native streaming cards for Hermes Agent's Feishu / Lark channel: typewriter replies in one
   CardKit card, one collapsible tool line above the answer, status ticks, typeset formulas, figures with captions and titled

@@ -31,4 +31,4 @@ def test_basic_card_adapter_survives_missing_optional_identity_seam(monkeypatch)
     monkeypatch.delattr(BasePlatformAdapter, "_source_session_key", raising=False)
     adapter = plugin.build_adapter(PlatformConfig(enabled=True, extra={"streaming_card": True}))
     assert isinstance(adapter, CardkitFeishuAdapter)
-    assert adapter._streaming_card is True and adapter._stop_button is False
+    assert adapter._streaming_card is True

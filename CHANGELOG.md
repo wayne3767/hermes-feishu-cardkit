@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0 — 2026-10-27
+
+- **The tool chain can always be collapsed again.** The `collapsible_panel` is gone: inside a
+  streaming card its toggle could open but not close, and no server update could drive it. The
+  card now shows one summary line ("思考与工具 · N 次工具调用") with an **展开 / 收起** button; the
+  chain is a separate element that exists only while expanded and the plugin stores that state per
+  card, so streams, seals, attachments and later updates all keep the reader's choice. The button
+  applies through a card action that repaints the card once.
+- **The Stop button is removed.** It duplicated `/stop` and made cards noisier. The callback handler
+  stays so buttons already sitting in chats keep working.
+- `platforms.feishu.card_stop_button` is no longer read.
+
 ## 0.6.1 — 2026-10-27
 
 - The approval segment marker is recorded only when the boundary will actually finalize an
