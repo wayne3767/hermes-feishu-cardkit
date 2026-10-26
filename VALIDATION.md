@@ -1,3 +1,14 @@
+# 0.6.0 审批后继续写卡片
+
+日期：2026-10-27。
+
+- 新增 `approval_reopen.py`：在加载时包装 `GatewayStreamConsumer.close_for_approval_prompt`，
+  仅对声明 `cardkit_approval_reopen` 的适配器把审批边界改为可重开（与澄清同一条路径），
+  不改任何 Hermes 文件；包裹失败时保持原有“审批后走普通消息”的行为。
+- 审批边界在缺少官方观察事件时也封为“本段已结束”，不再误显示“已完成”。
+- 新增测试：包装逻辑单元测试 + 真实 GatewayStreamConsumer 端到端（审批后创建第二张卡片、
+  工具链与正文落入新卡）。插件全套 pytest：380 passed（5 条既有环境失败与本轮无关）。
+
 # 0.5.2 标题与速度
 
 日期：2026-10-27。

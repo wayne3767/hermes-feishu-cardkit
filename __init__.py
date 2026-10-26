@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("hermes_feishu_cardkit")
 
-__version__ = "0.5.2"
+__version__ = "0.6.0"
 
 # Registry metadata mirrored from the bundled entry (plain values; the callables are proxied lazily).
 _STATIC_ENTRY = dict(
@@ -110,6 +110,8 @@ def build_adapter(config: Any) -> Any:
     if problem:
         logger.warning("hermes-feishu-cardkit disabled (%s); using the bundled Feishu adapter", problem)
         return _bundled_entry()["adapter_factory"](config)
+    from .approval_reopen import install_approval_reopen
+    install_approval_reopen()  # gateway-only path: approvals continue in a card, not messages
     return CardkitFeishuAdapter(config)
 
 

@@ -58,6 +58,7 @@ from .card_layout import (
     clip_markdown_tail, estimate_tokens, footer_update_actions, format_speed, json_text_bytes, labels_for, place_images,
     render_answer, render_footer, render_timeline, status_label, summary_for, timeline_update_actions, utf8_len,
 )
+from . import approval_reopen
 from .math_image import formula_digest, mathtext_available, render_formula_png
 from .math_text import convert_math, hide_open_formula, iter_block_formulas
 
@@ -312,6 +313,9 @@ class FeishuStreamingCardMixin:
     """
 
     SUPPORTS_NATIVE_STREAMING = True
+    # Opt in (approval_reopen.py): after an approval prompt the same transport keeps
+    # streaming, so the continuation lands in a fresh card instead of ordinary messages.
+    cardkit_approval_reopen = True
 
     def _init_streaming_cards(self) -> None:
         """Idempotent; also reached lazily for adapters built without ``__init__`` (test skeletons)."""
@@ -601,7 +605,8 @@ class FeishuStreamingCardMixin:
         self._observe_turn(turn)
         # Hermes also finalizes an interim segment before a human prompt. Only the official
         # terminal event proves the entire agent turn finished; a transport finalize does not.
-        turn.segment_finalized = turn.observation_terminal is False
+        turn.segment_finalized = (turn.observation_terminal is False
+                                  or approval_reopen.consume_approval_boundary(turn.chat_id))
         phase = (turn.phase if turn.segment_finalized or turn.phase in {
             PHASE_STOPPED, PHASE_FAILED, PHASE_BLOCKED, PHASE_TIMEOUT} else PHASE_DONE)
         turn.phase = phase

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0 — 2026-10-27
+
+- **Approvals continue in a card.** Hermes finalizes the native stream at an approval prompt and
+  then delivers the post-approval output as ordinary messages ("post-approval output goes via one
+  send() at got_done"), which is right for edit-in-place platforms but leaves the card stuck at
+  "本段已结束" while the rest of the turn dribbles into the chat as raw tool bubbles. The plugin now
+  opts its platform into the consumer's existing clarify-style reopen seam, so approving (or
+  denying) re-seeds a fresh card and the remaining tool calls and answer stream into it. No Hermes
+  file is modified: the seam is wrapped at load, scoped to this adapter, and any failure leaves the
+  original behaviour in place.
+- The approval boundary seals the card as a segment ("本段已结束") even when no official lifecycle
+  observation is available to prove the turn is not finished.
+- Approval prompts keep their bundled delivery (buttons/text) and their configured wait
+  (`approvals.timeout`, seconds; this deployment uses 300 = 5 minutes).
+
 ## 0.5.2 — 2026-10-27
 
 - The card title is now the turn status alone (思考中 / 调用工具中 / 生成中 / 已完成 …). The bot name
