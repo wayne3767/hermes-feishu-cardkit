@@ -81,6 +81,16 @@ def test_metrics_dedupe_missing_usage_and_actual_model():
     assert metrics.snapshot() == {"model": "fallback", "provider": "provider2"}
 
 
+def test_declared_model_is_a_fallback_until_a_served_model_arrives():
+    metrics = TurnMetrics()
+    assert metrics.snapshot() == {}
+    assert metrics.note_model("deepseek-v4.1-flash")
+    assert metrics.snapshot() == {"model": "deepseek-v4.1-flash"}, "known before the first token"
+    assert not metrics.note_model("https://secret.example/token")  # rejected like every untrusted label
+    metrics.record(api_request_id="a", response_model="served-model", provider="p")
+    assert metrics.snapshot()["model"] == "served-model", "the served model wins"
+
+
 def test_context_is_latest_request_not_turn_sum_and_handles_out_of_order():
     metrics = TurnMetrics()
     for rid, sequence, prompt in (("new", 2, 200), ("old", 1, 100)):

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0 — 2026-10-27
+
+- Move the tool panel to the top of the card body, directly under the header and above the answer,
+  so it reads as one line ("思考与工具 · N 次工具调用") until the reader expands it. The expanded
+  panel still lists every tool and skill call (`skill_view`, `terminal`, …) in order.
+- Show what the turn is actually doing: 思考中 before anything arrives, 调用工具中 once a tool call
+  is recorded but no prose has streamed, 生成中 while text flows, plus the existing waiting,
+  stopped, failed and timed-out states. While the card is quiet the footer refreshes every few
+  seconds, so the elapsed time keeps moving during a long tool call. The header subtitle is
+  refreshed through a full update only while no answer text exists, so a status change never
+  interrupts the typewriter.
+- Simplify the footer to status · elapsed · model, matching the card style this plugin follows.
+  The model is known before the first token (from `pre_llm_call`) and is replaced by the model the
+  response actually served once that event arrives. Per-turn tokens and context usage move behind
+  `FEISHU_CARD_FOOTER_USAGE` / `platforms.feishu.card_footer_usage` (default off).
+- Offline preview and tests updated for the new layout and wording.
+
 ## 0.4.0 — 2026-10-16
 
 - Keep the native platform plugin architecture; no sidecar, Hermes source patches or model calls.

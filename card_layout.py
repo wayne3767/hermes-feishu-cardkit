@@ -3,12 +3,13 @@
 Nothing here touches the network or adapter state; ``streaming.py`` owns the turn lifecycle and
 calls into these functions with plain data.  Layout of a completed card:
 
-    header      title = bot name, subtitle = 生成中 / 已完成 / 已停止, template blue / green / grey
+    header      title = bot name, subtitle = 思考中 / 调用工具中 / 生成中 / 已完成 / 已停止
+    timeline    collapsible panel "思考与工具 · N 次工具调用" — FIRST in the body, one line while
+                collapsed; expanding it shows every recorded tool (and skill) call
     answer      prose markdown; each figure (image + ``图N　标题`` caption) is its own centred
                 element; each table gets a centred ``表N　标题`` element above it
-    timeline    collapsible panel "思考与工具 · N 次工具调用", one line per tool call
     hr
-    footer      "⏳ 生成中 · N 次工具调用 · <latest tool>" → "✅ 已完成 · 32s · <model> · N 次工具调用"
+    footer      "⏳ 思考中 · 8s" → "✅ 已完成 · 32s · <model>"; token/context usage is opt-in
 
 While streaming, the answer is ONE markdown element (``ANSWER_ELEMENT_ID``) so the CardKit
 text-stream API has a stable target; the split into figures / tables happens on the final
@@ -76,6 +77,8 @@ class Labels:
     running: str
     done: str
     stopped: str
+    thinking: str  # running, no answer text and no tool calls yet
+    tooling: str  # running, tool calls recorded but no answer text yet
     generating: str  # notification preview while streaming
     timeline_empty: str
     omitted: str  # "{n}" lines dropped from the timeline
@@ -91,11 +94,13 @@ class Labels:
     stop_failed: str  # toast when the click cannot be turned into /stop
 
 
-ZH = Labels(running="生成中", done="已完成", stopped="已停止", generating="生成中…", timeline_empty="尚无工具调用",
+ZH = Labels(running="生成中", done="已完成", stopped="已停止", thinking="思考中", tooling="调用工具中",
+            generating="生成中…", timeline_empty="尚无工具调用",
             omitted="… 已省略 {n} 行", tools="{n} 次工具调用", figure="图{n}", table="表{n}", picture="图片", tool_only="✅",
             clipped_head="…（前文较长已省略，完整内容在生成结束后给出）", scheduled="定时任务",
             stop_button="停止生成", stop_toast="已请求停止", stop_failed="未能停止，请发送 /stop")
-EN = Labels(running="Generating", done="Done", stopped="Stopped", generating="Generating…", timeline_empty="No tool calls yet",
+EN = Labels(running="Generating", done="Done", stopped="Stopped", thinking="Thinking", tooling="Working",
+            generating="Generating…", timeline_empty="No tool calls yet",
             omitted="… {n} earlier lines omitted", tools="{n} tool calls", figure="Figure {n}", table="Table {n}", picture="Image",
             tool_only="✅", clipped_head="… (earlier text omitted; the full answer follows when done)", scheduled="Scheduled task",
             stop_button="Stop", stop_toast="Stopping…", stop_failed="Could not stop; send /stop")
@@ -105,6 +110,19 @@ _LABELS = {"zh": ZH, "en": EN}
 def labels_for(domain: str, locale: str = "") -> Labels:
     """``locale`` (zh / en) wins; otherwise the Lark international domain gets English."""
     return _LABELS.get((locale or "").lower()) or (EN if (domain or "").lower() == "lark" else ZH)
+
+
+def status_label(phase: str, labels: Labels = ZH, *, has_answer: bool = False, has_tools: bool = False) -> str:
+    """The word shown as the card status: granular while running, the phase label otherwise.
+
+    A running turn reads 思考中 before anything arrives, 调用工具中 once a tool call is recorded
+    but no prose has streamed, and 生成中 as soon as answer text exists.
+    """
+    if phase == PHASE_RUNNING:
+        if has_answer:
+            return labels.running
+        return labels.tooling if has_tools else labels.thinking
+    return phase_label(phase, labels)
 
 
 def phase_label(phase: str, labels: Labels = ZH) -> str:
@@ -246,35 +264,41 @@ def timeline_title(tool_count: int, labels: Labels = ZH, reading_preset: str = "
 
 
 def render_footer(*, phase: str, tool_count: int, elapsed: float, model: str = "", activity: str = "",
-                  labels: Labels = ZH, metrics: Optional[Dict[str, Any]] = None) -> str:
-    tools = labels.tools.format(n=tool_count)
-    if phase == PHASE_DONE:
-        parts = [f"✅ {labels.done}", format_duration(elapsed)] + ([model] if model else []) + [tools]
-    elif phase == PHASE_STOPPED:
-        parts = [f"⏹ {labels.stopped}", format_duration(elapsed)]
-    elif phase == PHASE_RUNNING:
-        parts = [f"⏳ {labels.running}", tools] + ([activity] if activity else [])
-    else:
-        parts = [phase_label(phase, labels), format_duration(elapsed), tools]
+                  labels: Labels = ZH, metrics: Optional[Dict[str, Any]] = None, status: str = "",
+                  show_usage: bool = False) -> str:
+    """One footer line: status · elapsed · model (· usage when opted in).
+
+    ``status`` carries the granular running word from ``status_label``; without it a running
+    footer falls back to 思考中, which is what a freshly seeded card is doing. ``tool_count`` and
+    ``activity`` are accepted for callers but no longer printed: the tool panel above the answer
+    already names the count and the calls. Token/context usage needs ``show_usage``.
+    """
+    del tool_count, activity
+    word = status or status_label(phase, labels)
+    parts = [f"{'✅' if phase == PHASE_DONE else '⏹' if phase == PHASE_STOPPED else '⏳'} {word}",
+             format_duration(elapsed)]
+    if model:
+        parts.append(model)
     if metrics:
         # Metrics already belong to a verified turn. Missing values stay absent; never show
         # the configured default model as evidence of which provider served this request.
         actual = metrics.get("model")
         if isinstance(actual, str) and actual and actual not in parts:
             parts.append(actual)
-        provider = metrics.get("provider")
-        if isinstance(provider, str) and provider:
-            parts.append(provider)
-        tokens = metrics.get("tokens") or {}
-        for key, arrow in (("input_tokens", "↑"), ("output_tokens", "↓")):
-            value = tokens.get(key)
-            if type(value) is int and value >= 0:
-                parts.append(f"{arrow}{value:,}")
-        context = metrics.get("context") or {}
-        used, limit = context.get("used_tokens"), context.get("max_tokens")
-        if type(used) is int and used >= 0 and type(limit) is int and limit > 0:
-            name = "上下文" if labels is ZH else "Context"
-            parts.append(f"{name} {used:,}/{limit:,} ({used / limit:.0%})")
+        if show_usage:
+            provider = metrics.get("provider")
+            if isinstance(provider, str) and provider:
+                parts.append(provider)
+            tokens = metrics.get("tokens") or {}
+            for key, arrow in (("input_tokens", "↑"), ("output_tokens", "↓")):
+                value = tokens.get(key)
+                if type(value) is int and value >= 0:
+                    parts.append(f"{arrow}{value:,}")
+            context = metrics.get("context") or {}
+            used, limit = context.get("used_tokens"), context.get("max_tokens")
+            if type(used) is int and used >= 0 and type(limit) is int and limit > 0:
+                name = "上下文" if labels is ZH else "Context"
+                parts.append(f"{name} {used:,}/{limit:,} ({used / limit:.0%})")
     return " · ".join(parts)
 
 
@@ -538,19 +562,23 @@ def build_stream_card(
     *, title: str, markdown: str, timeline_md: str, tool_count: int, footer: str, phase: str, summary: str = "",
     labels: Labels = ZH, streaming: Optional[bool] = None, plain: bool = False, stop_button: bool = False,
     stop_value: Optional[Dict[str, Any]] = None, timeline_expanded: bool = False,
-    reading_preset: str = "classic", width_mode: str = "default",
+    reading_preset: str = "classic", width_mode: str = "default", status: str = "",
 ) -> Dict[str, Any]:
     """Card JSON 2.0 for one turn.  ``markdown`` is the answer exactly as it should show (math and
     images already rendered); streaming mode is on only while ``phase`` is running (``streaming=False``
     keeps it off: a running card past CardKit's streaming window).  ``plain`` keeps a finished
-    answer in one element instead of the figure / table layout (the slim fallback card)."""
-    subtitle = phase_label(phase, labels)
+    answer in one element instead of the figure / table layout (the slim fallback card).
+
+    The tool panel is the FIRST body element — under the header and above the answer — and stays
+    one line until the reader expands it.  ``status`` overrides the header subtitle word."""
+    subtitle = status or phase_label(phase, labels)
     template = _PHASE_TEMPLATE.get(phase, "grey")
     running = phase in ACTIVE_PHASES
     streaming = phase == PHASE_RUNNING and streaming is not False
     body = markdown or SEED_PLACEHOLDER
-    elements = ([{"tag": "markdown", "element_id": ANSWER_ELEMENT_ID, "content": body}] if running or plain
-                else layout_answer_elements(body, labels))
+    answer = ([{"tag": "markdown", "element_id": ANSWER_ELEMENT_ID, "content": body}] if running or plain
+              else layout_answer_elements(body, labels))
+    elements: List[Dict[str, Any]] = []
     if running or tool_count:
         elements.append({
             "tag": "collapsible_panel", "element_id": TIMELINE_PANEL_ID, "expanded": timeline_expanded,
@@ -559,6 +587,7 @@ def build_stream_card(
             "border": {"color": "grey", "corner_radius": "8px"},
             "elements": [{"tag": "markdown", "element_id": TIMELINE_ELEMENT_ID, "content": timeline_md}],
         })
+    elements.extend(answer)
     elements.append({"tag": "hr"})
     elements.append({"tag": "markdown", "element_id": FOOTER_ELEMENT_ID, "text_size": "notation", "content": footer})
     if running and stop_button:
@@ -604,7 +633,7 @@ __all__ = [
     "TIMELINE_SLIM_LINES", "TIMELINE_SLIM_BYTES",
     "ACTIVITY_MAX_CHARS", "PHASE_RUNNING", "PHASE_DONE", "PHASE_STOPPED", "ImageItem", "Labels", "ZH", "EN", "labels_for",
     "utf8_len", "truncate_utf8", "json_text_bytes", "card_json_bytes", "clip_markdown_head", "clip_markdown_tail",
-    "format_duration", "render_answer", "summary_for", "render_timeline",
+    "format_duration", "render_answer", "summary_for", "render_timeline", "status_label",
     "timeline_title", "render_footer", "title_from_filename", "image_block", "append_images", "place_images",
     "layout_answer_elements", "table_component", "build_stream_card", "STOP_BUTTON_ID", "STOP_ACTION",
     "MARKDOWN_TABLE_ROWS", "TABLE_PAGE_SIZE", "MAX_TABLE_COMPONENTS", "timeline_update_actions", "footer_update_actions",

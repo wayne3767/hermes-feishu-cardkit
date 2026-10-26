@@ -131,10 +131,11 @@ def write_previews(output: Path, *, config_path: Path | None = None) -> dict[str
                "context": {"used_tokens": 1800, "max_tokens": 16000}}
     cards = {}
     for phase in PHASES:
-        footer = cl.render_footer(phase=phase, tool_count=2, elapsed=42, metrics=metrics)
+        status = cl.status_label(phase, has_answer=True, has_tools=True)
+        footer = cl.render_footer(phase=phase, tool_count=2, elapsed=42, metrics=metrics, status=status)
         cards[phase] = cl.build_stream_card(
             title="Hermes · 离线示例", markdown=answer, timeline_md=timeline,
-            tool_count=2, footer=footer, phase=phase, stop_button=True, **resolved["values"],
+            tool_count=2, footer=footer, phase=phase, status=status, stop_button=True, **resolved["values"],
         )
     scope = "file/next-load" if config_path else "defaults/preview"
     manifest = {"mode": "offline-preview", "configuration_scope": f"{scope}; not running gateway values",

@@ -29,6 +29,7 @@ class TurnMetrics:
     _output: int | None = 0
     _latest_order: tuple[float, int] = (-1, -1)
     _model: str = ""
+    _declared_model: str = ""  # the model pre_llm_call said this session will call with
     _provider: str = ""
     _used: int | None = None
     _capacity: int | None = None
@@ -64,12 +65,25 @@ class TurnMetrics:
             self._used, self._capacity = prompt, _count(context_length)
         return True
 
+    def note_model(self, model: Any = None) -> bool:
+        """Remember the model the session declared (``pre_llm_call``) before any response arrives.
+
+        Only a fallback: once an official response names the model it served, that one wins, so
+        a fallback model or a provider swap is never reported as the configured default.
+        """
+        label = _label(model)
+        if not label:
+            return False
+        self._declared_model = label
+        return True
+
     def snapshot(self) -> dict[str, Any]:
-        if not self._seen or self._capped:
-            return {}
         result: dict[str, Any] = {}
-        if self._model:
-            result["model"] = self._model
+        model = self._model or self._declared_model
+        if model:
+            result["model"] = model
+        if not self._seen or self._capped:
+            return result  # totals are incomplete: only the model identity is publishable
         if self._provider:
             result["provider"] = self._provider
         tokens = {}

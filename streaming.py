@@ -51,12 +51,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import unquote
 
 from .card_layout import (
-    ACTIVITY_MAX_CHARS, ANSWER_ELEMENT_ID, CARD_JSON_MAX_BYTES, CARD_MAX_BYTES, DEFAULT_CARD_TITLE, PHASE_DONE,
+    ACTIVITY_MAX_CHARS, ACTIVE_PHASES, ANSWER_ELEMENT_ID, CARD_JSON_MAX_BYTES, CARD_MAX_BYTES, DEFAULT_CARD_TITLE, PHASE_DONE,
     PHASE_RUNNING, PHASE_STOPPED, PHASE_UNKNOWN, PHASE_WAITING_APPROVAL, PHASE_WAITING_INPUT,
     PHASE_BLOCKED, PHASE_TIMEOUT, PHASE_FAILED, PHASE_SEGMENT, TIMELINE_ELEMENT_ID, TIMELINE_MAX_BYTES, TIMELINE_MAX_LINES, TIMELINE_SLIM_BYTES,
     TIMELINE_SLIM_LINES, ImageItem, Labels, append_images, build_stream_card, card_json_bytes, clip_markdown_head,
     clip_markdown_tail, footer_update_actions, json_text_bytes, labels_for, place_images, render_answer, render_footer,
-    render_timeline, summary_for, timeline_update_actions, utf8_len,
+    render_timeline, status_label, summary_for, timeline_update_actions, utf8_len,
 )
 from .math_image import formula_digest, mathtext_available, render_formula_png
 from .math_text import convert_math, hide_open_formula, iter_block_formulas
@@ -133,6 +133,9 @@ class StreamCardTurn:
     revivals: int = 0  # bumped on revival; an idle seal still in flight for an older life gives up
     reply_to: Optional[str] = None
     phase: str = PHASE_RUNNING
+    status_word: str = ""  # last status shown in the header/footer (思考中 / 调用工具中 / 生成中 …)
+    header_dirty: bool = False  # the header subtitle (status) needs a full-layout refresh
+    footer_at: float = field(default_factory=time.monotonic)  # last footer write (the elapsed ticker)
     metrics: Dict[str, Any] = field(default_factory=dict)
     observation_ref: Any = None
     observation_revision: int = -1
@@ -456,6 +459,9 @@ class FeishuStreamingCardMixin:
         answer, overlay = split_stream_frame(text)
         merge_overlay(turn, overlay)
         view, clipped = self._answer_view(turn, answer)
+        # The raw answer is what the card will show; set it before rendering so the seed's
+        # status word already reflects a first frame that carries text.
+        turn.answer, turn.answer_clipped = answer, clipped
         try:
             card_id = await self._create_card(self._card(turn, turn.phase, view))
             if not card_id:
@@ -473,6 +479,7 @@ class FeishuStreamingCardMixin:
             self._note_open_failure(str(exc))
             return None
         turn.card_id, turn.message_id, turn.answer, turn.answer_clipped = card_id, result.message_id or "", answer, clipped
+        turn.status_word = self._status(turn, PHASE_RUNNING)  # what the seed card already shows
         turn.delivery_result = result
         turn.thread_id = thread_id
         turn.last_frame_at = time.monotonic()
@@ -520,13 +527,16 @@ class FeishuStreamingCardMixin:
             if await self._push_element(turn, ANSWER_ELEMENT_ID, view):
                 turn.answer, turn.answer_clipped = answer, clipped
             self._prefetch_formula_images(turn, answer)
+        self._note_status(turn)
         if turn.controls_dirty:
             # The official turn identity can arrive after the seed. Adding its Stop
             # button requires a full layout, but is not a reason to end streaming.
             view, _ = self._answer_view(turn, turn.answer)
             card, _ = self._fit_card(turn, turn.phase, view, streaming=True)
             if await self._replace(turn, card, level=logging.DEBUG):
-                turn.controls_dirty = turn.footer_dirty = False
+                turn.controls_dirty = turn.footer_dirty = turn.header_dirty = False
+                turn.status_word = self._status(turn, turn.phase)
+                turn.footer_at = time.monotonic()
                 return True
         if timeline_changed:
             labels = self._labels
@@ -537,8 +547,10 @@ class FeishuStreamingCardMixin:
                 await self._push_element(turn, TIMELINE_ELEMENT_ID, render_timeline(turn.timeline, labels))
             else:
                 turn.footer_dirty = False
+                turn.footer_at = time.monotonic()
         elif turn.footer_dirty:
-            turn.footer_dirty = not await self._batch_update(turn, footer_update_actions(self._footer(turn, turn.phase)))
+            if await self._batch_update(turn, footer_update_actions(self._footer(turn, turn.phase))):
+                turn.footer_dirty, turn.footer_at = False, time.monotonic()
         return True
 
     async def _push_full(self, turn: StreamCardTurn, answer: str, timeline_changed: bool) -> bool:
@@ -546,15 +558,19 @@ class FeishuStreamingCardMixin:
         whole running layout goes out as one ``card.update`` — no typewriter, same card, and
         at the consumer's edit pace (~1/s) well inside CardKit's 10 updates/s per card."""
         if (answer == turn.answer and not timeline_changed and not turn.dirty
-                and not turn.controls_dirty and not turn.footer_dirty):
+                and not turn.controls_dirty and not turn.footer_dirty and not turn.header_dirty):
             return True
         view, clipped = self._answer_view(turn, answer, streaming=False)
+        previous = turn.answer
+        turn.answer = answer  # the card is built from this frame, so its status word must be too
         card, _ = self._fit_card(turn, turn.phase, view, streaming=False)
         if await self._replace(turn, card, level=logging.DEBUG):
             turn.answer, turn.answer_clipped, turn.dirty = answer, clipped, False
-            turn.controls_dirty = turn.footer_dirty = False
+            turn.controls_dirty = turn.footer_dirty = turn.header_dirty = False
+            turn.status_word = self._status(turn, turn.phase)
+            turn.footer_at = time.monotonic()
         else:
-            turn.dirty = True
+            turn.answer, turn.dirty = previous, True
         if answer:
             self._prefetch_formula_images(turn, answer)
         return True
@@ -683,17 +699,32 @@ class FeishuStreamingCardMixin:
                 return
             async with turn.write_lock:
                 changed = self._observe_turn(turn)
-                if changed or turn.dirty or turn.footer_dirty or turn.controls_dirty:
+                self._note_status(turn)
+                full = turn.header_dirty or turn.dirty or turn.controls_dirty
+                if changed or full or turn.footer_dirty:
                     if turn.phase != PHASE_RUNNING:
                         turn.streaming_closed = True
-                    view, _ = self._answer_view(turn, turn.answer, streaming=not turn.streaming_closed)
-                    card, _ = self._fit_card(turn, turn.phase, view, streaming=not turn.streaming_closed)
-                    refreshed = await self._replace(turn, card, level=logging.DEBUG)
-                    # Retain the original reason for a retry: a failed control or
-                    # footer refresh must not force the next frame out of streaming.
-                    turn.dirty = turn.dirty and not refreshed
-                    turn.controls_dirty = turn.controls_dirty and not refreshed
-                    turn.footer_dirty = not refreshed
+                    if full:
+                        view, _ = self._answer_view(turn, turn.answer, streaming=not turn.streaming_closed)
+                        card, _ = self._fit_card(turn, turn.phase, view, streaming=not turn.streaming_closed)
+                        refreshed = await self._replace(turn, card, level=logging.DEBUG)
+                        # Retain the original reason for a retry: a failed control or
+                        # footer refresh must not force the next frame out of streaming.
+                        turn.dirty = turn.dirty and not refreshed
+                        turn.controls_dirty = turn.controls_dirty and not refreshed
+                        turn.header_dirty = turn.header_dirty and not refreshed
+                        turn.footer_dirty = not refreshed
+                    else:
+                        written = await self._batch_update(
+                            turn, footer_update_actions(self._footer(turn, turn.phase)))
+                        turn.footer_dirty = not written
+                        turn.footer_at = time.monotonic() if written else turn.footer_at
+                elif (turn.phase in ACTIVE_PHASES
+                      and time.monotonic() - turn.footer_at >= _WATCHDOG_POLL_SECONDS * 0.6):
+                    # A quiet turn still moves: refresh the elapsed time (and the status word)
+                    # every poll so a long tool call never looks frozen.
+                    written = await self._batch_update(turn, footer_update_actions(self._footer(turn, turn.phase)))
+                    turn.footer_at = time.monotonic() if written else turn.footer_at
             # An explicit human wait is still active even if it lasts longer than our text idle
             # threshold. Its real resolution/timeout observer will change this state.
             if turn.phase in {PHASE_WAITING_APPROVAL, PHASE_WAITING_INPUT} and turn.stop_requested_at is None:
@@ -792,9 +823,32 @@ class FeishuStreamingCardMixin:
             phase = PHASE_SEGMENT
         return render_footer(
             phase=phase, tool_count=turn.tool_count, elapsed=turn.elapsed,
-            activity=turn.activity if phase == PHASE_RUNNING else "", labels=self._labels,
-            metrics=turn.metrics,
+            status=self._status(turn, phase), labels=self._labels, metrics=turn.metrics,
+            show_usage=bool(getattr(self, "_footer_usage", False)),
         )
+
+    def _status(self, turn: StreamCardTurn, phase: str) -> str:
+        """思考中 / 调用工具中 / 生成中 while running; the phase word otherwise."""
+        if turn.segment_finalized and phase in {PHASE_RUNNING, PHASE_DONE}:
+            phase = PHASE_SEGMENT
+        answer = turn.answer.rstrip(_CURSOR_CHARS).strip()
+        return status_label(phase, self._labels, has_answer=bool(answer), has_tools=turn.tool_count > 0)
+
+    def _note_status(self, turn: StreamCardTurn) -> bool:
+        """Refresh the status word when it changes; True when it did.
+
+        The footer is an element, so a batch update carries the new word cheaply. The header
+        subtitle can only change through a full card update, so it is refreshed only while no
+        answer text exists (it would re-render the answer mid-typewriter otherwise); once prose
+        is streaming the header's phase word is already the right one.
+        """
+        status = self._status(turn, turn.phase)
+        if status == turn.status_word:
+            return False
+        turn.status_word, turn.footer_dirty = status, True
+        if not turn.answer.rstrip(_CURSOR_CHARS).strip():
+            turn.header_dirty = True
+        return True
 
     def _card(self, turn: StreamCardTurn, phase: str, markdown: str, *, streaming: Optional[bool] = None,
               timeline_lines: int = TIMELINE_MAX_LINES, timeline_bytes: int = TIMELINE_MAX_BYTES,
@@ -806,6 +860,7 @@ class FeishuStreamingCardMixin:
             title=str(getattr(self, "_bot_name", "") or "").strip() or DEFAULT_CARD_TITLE, markdown=markdown,
             timeline_md=render_timeline(turn.timeline, labels, max_lines=timeline_lines, max_bytes=timeline_bytes),
             tool_count=turn.tool_count, footer=self._footer(turn, phase), phase=phase,
+            status=self._status(turn, phase),
             summary=summary_for(markdown, phase, labels), labels=labels, streaming=streaming, plain=plain,
             stop_button=not turn.segment_finalized and bool(getattr(self, "_stop_button", False)) and bool(
                 getattr(self, "_can_stop_card", lambda _turn: False)(turn)),

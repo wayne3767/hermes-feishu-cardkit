@@ -95,6 +95,8 @@ class CardkitFeishuAdapter(CardInteractionMixin, FeishuStreamingCardMixin, _bund
         self._card_math_images = _truthy(_setting(extra, "card_math_images", "FEISHU_CARD_MATH_IMAGES", "true"))
         self._card_locale = str(_setting(extra, "card_locale", "FEISHU_CARD_LOCALE", "")).strip().lower()
         self._cron_card = _truthy(_setting(extra, "cron_card", "FEISHU_CRON_CARD", "true"))
+        # Token/context usage in the footer is opt-in: the default line is status · 时长 · 模型.
+        self._footer_usage = _truthy(_setting(extra, "card_footer_usage", "FEISHU_CARD_FOOTER_USAGE", "false"))
         template = str(_setting(extra, "cron_card_template", "FEISHU_CRON_CARD_TEMPLATE", DEFAULT_TEMPLATE)).strip().lower()
         if template not in TEMPLATES:
             logger.warning("[Feishu] unknown cron card template %r; using %s", template, DEFAULT_TEMPLATE)

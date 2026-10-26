@@ -236,6 +236,9 @@ class ObservationStore:
                 if ref in self._observations:
                     return
                 obs = _Observation(ref, key, admitted[0], mid)
+                # Known before the first token: the model this session will call with.
+                # It is a fallback only; post_api_request replaces it with the served model.
+                obs.metrics.note_model(payload.get("model"))
                 self._observations[ref] = obs
                 self._prune()
             elif event == "agent_loop_stopped":

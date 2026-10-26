@@ -191,9 +191,23 @@ class TestFrameParsing:
 
     def test_footer_and_duration(self):
         assert cl.format_duration(32.4) == "32s" and cl.format_duration(177) == "2m57s"
-        assert cl.render_footer(phase="done", tool_count=4, elapsed=32, model="m") == "✅ 已完成 · 32s · m · 4 次工具调用"
-        assert cl.render_footer(phase="running", tool_count=1, elapsed=3, activity="🔍 x") == "⏳ 生成中 · 1 次工具调用 · 🔍 x"
+        assert cl.render_footer(phase="done", tool_count=4, elapsed=32, model="m") == "✅ 已完成 · 32s · m"
+        assert cl.render_footer(phase="running", tool_count=0, elapsed=3) == "⏳ 思考中 · 3s"
+        assert cl.render_footer(phase="running", tool_count=1, elapsed=8,
+                                status=cl.ZH.tooling) == "⏳ 调用工具中 · 8s"
         assert cl.render_footer(phase="stopped", tool_count=0, elapsed=5) == "⏹ 已停止 · 5s"
+        usage = {"model": "m", "provider": "p", "tokens": {"input_tokens": 12, "output_tokens": 3},
+                 "context": {"used_tokens": 12, "max_tokens": 100}}
+        assert cl.render_footer(phase="done", tool_count=0, elapsed=5, metrics=usage) == "✅ 已完成 · 5s · m"
+        assert cl.render_footer(phase="done", tool_count=0, elapsed=5, metrics=usage, show_usage=True) == (
+            "✅ 已完成 · 5s · m · p · ↑12 · ↓3 · 上下文 12/100 (12%)"), "usage is opt-in"
+
+    def test_status_label_tracks_what_the_turn_is_doing(self):
+        assert cl.status_label("running") == "思考中"
+        assert cl.status_label("running", has_tools=True) == "调用工具中"
+        assert cl.status_label("running", has_tools=True, has_answer=True) == "生成中"
+        assert cl.status_label("done", has_answer=True) == "已完成"
+        assert cl.status_label("waiting_input") == "等待输入"
 
     def test_card_layout_phases(self):
         running = cl.build_stream_card(title="T", markdown="", timeline_md="x", tool_count=0, footer="f", phase="running")
@@ -249,7 +263,7 @@ class TestTurnLifecycle:
         assert card["header"]["title"]["content"] == "小助手" and card["header"]["template"] == "blue"
         els = _elements(card)
         assert els[cl.ANSWER_ELEMENT_ID]["content"] == cl.SEED_PLACEHOLDER
-        assert els[cl.FOOTER_ELEMENT_ID]["content"].startswith("⏳ 生成中")
+        assert els[cl.FOOTER_ELEMENT_ID]["content"].startswith("⏳ 思考中")
         (reply,) = fake.named("im_reply")  # reply_to → reply, not a fresh chat message
         assert reply.message_id == "om_user"
         assert json.loads(reply.request_body.content) == {"type": "card", "data": {"card_id": CARD_ID}}
@@ -271,9 +285,25 @@ class TestTurnLifecycle:
         assert _run(adapter.send_stream_frame("Hello▌", chat_id=CHAT, turn_id="t1")) is True  # unchanged: no call
         pushes = fake.named("content")
         assert [p.request_body.content for p in pushes] == ["Hel▌", "Hello▌"]
-        assert [p.request_body.sequence for p in pushes] == [1, 2]
+        seqs = [p.request_body.sequence for p in pushes]
+        assert seqs == sorted(seqs) and len(set(seqs)) == 2, "footer refreshes may sit between answer pushes"
         assert all(p.card_id == CARD_ID and p.element_id == cl.ANSWER_ELEMENT_ID for p in pushes)
         assert len({p.request_body.uuid for p in pushes}) == 2
+
+    def test_running_status_moves_from_thinking_to_tools_to_generating(self):
+        adapter, fake = _adapter()
+        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        seed = fake.card_of(fake.named("create")[0])
+        assert seed["header"]["subtitle"]["content"] == "思考中"
+        assert _elements(seed)[cl.FOOTER_ELEMENT_ID]["content"].startswith("⏳ 思考中")
+        _run(adapter.send_stream_frame(SEP + "🔍 Searching▌", chat_id=CHAT, turn_id="t1"))
+        actions = json.loads(fake.named("batch")[-1].request_body.actions)
+        footer = next(a for a in actions if a["params"]["element_id"] == cl.FOOTER_ELEMENT_ID)
+        assert footer["params"]["partial_element"]["content"].startswith("⏳ 调用工具中")
+        _run(adapter.send_stream_frame("答案开始▌", chat_id=CHAT, turn_id="t1"))
+        actions = json.loads(fake.named("batch")[-1].request_body.actions)
+        assert actions[-1]["params"]["partial_element"]["content"].startswith("⏳ 生成中")
+        assert fake.pushes(cl.ANSWER_ELEMENT_ID) == ["答案开始▌"], "the typewriter is never interrupted by a status change"
 
     def test_tool_overlay_goes_to_timeline_not_answer(self):
         adapter, fake = _adapter()
@@ -285,17 +315,17 @@ class TestTurnLifecycle:
         by_id = {a["params"]["element_id"]: a["params"]["partial_element"] for a in actions}
         assert by_id[cl.TIMELINE_ELEMENT_ID]["content"] == '🔍 Searching the web for "x"'
         assert by_id[cl.TIMELINE_PANEL_ID]["header"]["title"]["content"] == "思考与工具 · 1 次工具调用"
-        assert '🔍 Searching the web for "x"' in by_id[cl.FOOTER_ELEMENT_ID]["content"]
+        assert by_id[cl.FOOTER_ELEMENT_ID]["content"].startswith("⏳ 调用工具中"), "the footer names what the turn is doing"
         # Text arrives: overlay clears, answer streams, timeline keeps the entry.
         _run(adapter.send_stream_frame("The answer▌", chat_id=CHAT, turn_id="t1"))
         assert fake.pushes(cl.ANSWER_ELEMENT_ID) == ["The answer▌"]
-        assert len(fake.named("batch")) == 1
+        assert len(fake.named("batch")) == 2, "the status word moves to 生成中"
         # Second tool after text (strategy B): stacked below the text, appended to the timeline.
         _run(adapter.send_stream_frame("The answer" + SEP + "💻 terminal\n```\nls\n```▌", chat_id=CHAT, turn_id="t1"))
         turn = adapter._stream_cards[f"{CHAT}:t1"]
         assert turn.timeline == ['🔍 Searching the web for "x"', "💻 terminal", "```", "ls", "```"]
         assert turn.tool_count == 2
-        assert len(fake.named("batch")) == 2
+        assert len(fake.named("batch")) == 3
 
     def test_batch_failure_falls_back_to_timeline_content_push(self):
         adapter, fake = _adapter()
@@ -351,7 +381,7 @@ class TestTurnLifecycle:
         assert _run(adapter.send_stream_frame("✅ 检查通过，一切正常。", finalize=True, chat_id=CHAT, turn_id="t1")) is True
         card = fake.card_of(fake.named("update")[0])
         assert cl.TIMELINE_PANEL_ID not in _elements(card), "no tool panel once the bogus entry is dropped"
-        assert "0 次工具调用" in _elements(card)[cl.FOOTER_ELEMENT_ID]["content"]
+        assert "次工具调用" not in _elements(card)[cl.FOOTER_ELEMENT_ID]["content"]
 
     def test_first_content_frame_without_seed_opens_card_with_text(self):
         adapter, fake = _adapter()
@@ -582,9 +612,9 @@ class TestConsumerIntegration:
         answer_pushes = fake.pushes(cl.ANSWER_ELEMENT_ID)
         assert answer_pushes and answer_pushes[-1] == "Hello world"
         assert all("Searching" not in p and "---" not in p for p in answer_pushes), "tool lines never reach the answer"
-        (batch,) = fake.named("batch")
+        (batch,) = [b for b in fake.named("batch") if "Searching the web" in b.request_body.actions]
         assert "Searching the web" in batch.request_body.actions
-        (update,) = fake.named("update")
+        update = fake.named("update")[-1]
         card = fake.card_of(update)
         assert card["header"]["template"] == "green"
         els = _elements(card)
@@ -817,6 +847,15 @@ class TestPositionedImages:
 class TestAnswerLayout:
     """Completed cards split the answer into prose, centred figures and captioned tables."""
 
+    def test_tool_panel_leads_the_body_above_the_answer(self):
+        card = cl.build_stream_card(title="T", markdown="正文", timeline_md="🔍 a\n💻 b", tool_count=2,
+                                    footer="f", phase="done", status=cl.ZH.done)
+        elements = card["body"]["elements"]
+        assert elements[0]["element_id"] == cl.TIMELINE_PANEL_ID, "the one-line tool box sits under the header"
+        assert elements[0]["expanded"] is False and "2 次工具调用" in elements[0]["header"]["title"]["content"]
+        assert elements[1]["element_id"] == cl.ANSWER_ELEMENT_ID
+        assert card["header"]["subtitle"]["content"] == "已完成"
+
     def test_figure_blocks_are_centred_and_prose_keeps_ids(self):
         md = "开头。\n\n![曲线](img_1)\n<font color=\"grey\">图1　曲线</font>\n\n结尾。"
         els = cl.layout_answer_elements(md)
@@ -853,7 +892,7 @@ class TestAnswerLayout:
 
     def test_completed_card_uses_layout_but_running_card_does_not(self):
         running = cl.build_stream_card(title="T", markdown="| a |\n|---|\n| 1 |", timeline_md="", tool_count=0, footer="f", phase="running")
-        assert [e.get("element_id") for e in running["body"]["elements"][:1]] == [cl.ANSWER_ELEMENT_ID]
+        assert [e.get("element_id") for e in running["body"]["elements"][:2]] == [cl.TIMELINE_PANEL_ID, cl.ANSWER_ELEMENT_ID]
         assert "表1" not in json.dumps(running, ensure_ascii=False)
         done = cl.build_stream_card(title="T", markdown="| a |\n|---|\n| 1 |", timeline_md="", tool_count=0, footer="f", phase="done")
         assert "表1" in json.dumps(done, ensure_ascii=False)
@@ -950,7 +989,7 @@ class TestLocale:
         fake.scripts["image"] = [_ok(image_key="img_a")]
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
         running = fake.card_of(fake.named("create")[0])
-        assert running["header"]["subtitle"]["content"] == "Generating" and running["config"]["summary"]["content"] == "Generating…"
+        assert running["header"]["subtitle"]["content"] == "Thinking" and running["config"]["summary"]["content"] == "Generating…"
         _run(adapter.send_stream_frame(SEP + "🔍 Searching▌", chat_id=CHAT, turn_id="t1"))
         assert "1 tool calls" in fake.named("batch")[0].request_body.actions
         assert _run(adapter.send_stream_frame("Table 1: results\n| a |\n|---|\n| 1 |", finalize=True, chat_id=CHAT, turn_id="t1")) is True
@@ -1042,7 +1081,7 @@ class TestIdleWatchdog:
             await adapter.send_stream_frame("新", chat_id=CHAT)
 
         _run(_scenario())
-        assert [fake.card_of(c)["body"]["elements"][0]["content"] for c in fake.named("create")] == ["旧", "新"]
+        assert [ _elements(fake.card_of(c))[cl.ANSWER_ELEMENT_ID]["content"] for c in fake.named("create")] == ["旧", "新"]
 
     def test_interrupt_seals_the_chats_cards_quickly(self, monkeypatch):
         self._fast(monkeypatch, idle=30.0)

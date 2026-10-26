@@ -50,6 +50,7 @@ def test_seed_before_agent_events_waits_without_false_stop_then_shows_actual_usa
     monkeypatch.setattr(fs, "_WATCHDOG_POLL_SECONDS", .01)
     monkeypatch.setattr(fs, "IDLE_SEAL_SECONDS", .04)
     adapter, fake = _adapter()
+    adapter._footer_usage = True
 
     async def scenario():
         await adapter.send_stream_frame("初始正文", chat_id=CHAT, reply_to="in-1", turn_id="consumer-unrelated-id")
@@ -81,7 +82,8 @@ def test_seed_before_agent_events_waits_without_false_stop_then_shows_actual_usa
     footer = _elements(final)[cl.FOOTER_ELEMENT_ID]["content"]
     assert final["header"]["subtitle"]["content"] == "已完成"
     assert "fallback-model" in footer and "configured-model" not in footer
-    assert "↑320" in footer and "↓40" in footer and "200/2,000 (10%)" in footer
+    assert footer.startswith("✅ 已完成 · ")
+    assert "↑320" in footer and "↓40" in footer and "200/2,000 (10%)" in footer, "opt-in usage stays available" 
 
 
 def test_same_chat_without_exact_inbound_identity_never_borrows_metrics(monkeypatch):
@@ -130,6 +132,7 @@ def test_metrics_only_frame_refreshes_footer_without_closing_typewriter(monkeypa
     monkeypatch.setattr(lifecycle, "OBSERVATIONS", store)
     context = admitted(store)
     adapter, fake = _adapter()
+    adapter._footer_usage = True
     adapter._stop_button = True
     adapter._can_stop_card = lambda turn: bool(turn.observation_ref) and turn.observation_terminal is False
     async def scenario():
