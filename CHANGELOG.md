@@ -11,7 +11,13 @@
   seconds, so the elapsed time keeps moving during a long tool call. The header subtitle is
   refreshed through a full update only while no answer text exists, so a status change never
   interrupts the typewriter.
-- Simplify the footer to status · elapsed · model, matching the card style this plugin follows.
+- Add a live decode rate while the answer streams: status · elapsed · speed · model, e.g.
+  "⏳ 生成中 · 45s · 31 tok/s · deepseek-v4.1-flash". The running figure is a windowed
+  estimate from the text landed so far (CJK ≈ 1 token, other runs ≈ 4 characters per
+  token) and disappears when no text has arrived for a while; once a call finishes the
+  official output tokens over streaming time (first chunk → end) take over, and a
+  finished card shows the per-turn measured rate.
+- Simplify the footer to status · elapsed · speed · model, matching the card style this plugin follows.
   The model is known before the first token (from `pre_llm_call`) and is replaced by the model the
   response actually served once that event arrives. Per-turn tokens and context usage move behind
   `FEISHU_CARD_FOOTER_USAGE` / `platforms.feishu.card_footer_usage` (default off).

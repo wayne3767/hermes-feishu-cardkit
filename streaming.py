@@ -55,8 +55,8 @@ from .card_layout import (
     PHASE_RUNNING, PHASE_STOPPED, PHASE_UNKNOWN, PHASE_WAITING_APPROVAL, PHASE_WAITING_INPUT,
     PHASE_BLOCKED, PHASE_TIMEOUT, PHASE_FAILED, PHASE_SEGMENT, TIMELINE_ELEMENT_ID, TIMELINE_MAX_BYTES, TIMELINE_MAX_LINES, TIMELINE_SLIM_BYTES,
     TIMELINE_SLIM_LINES, ImageItem, Labels, append_images, build_stream_card, card_json_bytes, clip_markdown_head,
-    clip_markdown_tail, footer_update_actions, json_text_bytes, labels_for, place_images, render_answer, render_footer,
-    render_timeline, status_label, summary_for, timeline_update_actions, utf8_len,
+    clip_markdown_tail, estimate_tokens, footer_update_actions, format_speed, json_text_bytes, labels_for, place_images,
+    render_answer, render_footer, render_timeline, status_label, summary_for, timeline_update_actions, utf8_len,
 )
 from .math_image import formula_digest, mathtext_available, render_formula_png
 from .math_text import convert_math, hide_open_formula, iter_block_formulas
@@ -96,6 +96,13 @@ _REVIVE_TTL_SECONDS = 1800.0
 FINAL_UPDATE_RETRY_DELAYS = (1.0, 3.0)
 # Headroom kept for tool lines that arrive after the last answer push.
 _TIMELINE_GROWTH_RESERVE = 1024
+# Live decode speed: a windowed estimate over the answer text landed so far; official usage
+# replaces it once a call finishes.  A quiet window (no text) hides the rate again.
+SPEED_WINDOW_SECONDS = 12.0
+SPEED_MIN_SPAN_SECONDS = 1.2
+SPEED_MAX_IDLE_SECONDS = 12.0
+# The footer (status, elapsed, speed) refreshes at most this often while text streams.
+FOOTER_TICK_SECONDS = 2.0
 FORMULA_IMAGE_WAIT_SECONDS = 8.0  # finalize waits this long for in-flight formula uploads
 _THREAD_CACHE_MAX = 512
 _FORMULA_IMAGE_CACHE_MAX = 256
@@ -136,6 +143,8 @@ class StreamCardTurn:
     status_word: str = ""  # last status shown in the header/footer (思考中 / 调用工具中 / 生成中 …)
     header_dirty: bool = False  # the header subtitle (status) needs a full-layout refresh
     footer_at: float = field(default_factory=time.monotonic)  # last footer write (the elapsed ticker)
+    speed_samples: "deque[Tuple[float, int]]" = field(default_factory=lambda: deque(maxlen=48))
+    speed_tokens: int = 0  # estimated tokens in the answer landed so far
     metrics: Dict[str, Any] = field(default_factory=dict)
     observation_ref: Any = None
     observation_revision: int = -1
@@ -480,6 +489,7 @@ class FeishuStreamingCardMixin:
             return None
         turn.card_id, turn.message_id, turn.answer, turn.answer_clipped = card_id, result.message_id or "", answer, clipped
         turn.status_word = self._status(turn, PHASE_RUNNING)  # what the seed card already shows
+        self._note_speed(turn, answer)
         turn.delivery_result = result
         turn.thread_id = thread_id
         turn.last_frame_at = time.monotonic()
@@ -528,6 +538,9 @@ class FeishuStreamingCardMixin:
                 turn.answer, turn.answer_clipped = answer, clipped
             self._prefetch_formula_images(turn, answer)
         self._note_status(turn)
+        self._note_speed(turn, turn.answer)
+        if time.monotonic() - turn.footer_at >= FOOTER_TICK_SECONDS:
+            turn.footer_dirty = True  # keep the elapsed time and the decode rate moving
         if turn.controls_dirty:
             # The official turn identity can arrive after the seed. Adding its Stop
             # button requires a full layout, but is not a reason to end streaming.
@@ -569,6 +582,7 @@ class FeishuStreamingCardMixin:
             turn.controls_dirty = turn.footer_dirty = turn.header_dirty = False
             turn.status_word = self._status(turn, turn.phase)
             turn.footer_at = time.monotonic()
+            self._note_speed(turn, answer)
         else:
             turn.answer, turn.dirty = previous, True
         if answer:
@@ -720,7 +734,7 @@ class FeishuStreamingCardMixin:
                         turn.footer_dirty = not written
                         turn.footer_at = time.monotonic() if written else turn.footer_at
                 elif (turn.phase in ACTIVE_PHASES
-                      and time.monotonic() - turn.footer_at >= _WATCHDOG_POLL_SECONDS * 0.6):
+                      and time.monotonic() - turn.footer_at >= FOOTER_TICK_SECONDS * 1.5):
                     # A quiet turn still moves: refresh the elapsed time (and the status word)
                     # every poll so a long tool call never looks frozen.
                     written = await self._batch_update(turn, footer_update_actions(self._footer(turn, turn.phase)))
@@ -823,8 +837,8 @@ class FeishuStreamingCardMixin:
             phase = PHASE_SEGMENT
         return render_footer(
             phase=phase, tool_count=turn.tool_count, elapsed=turn.elapsed,
-            status=self._status(turn, phase), labels=self._labels, metrics=turn.metrics,
-            show_usage=bool(getattr(self, "_footer_usage", False)),
+            status=self._status(turn, phase), speed=self._speed(turn, phase), labels=self._labels,
+            metrics=turn.metrics, show_usage=bool(getattr(self, "_footer_usage", False)),
         )
 
     def _status(self, turn: StreamCardTurn, phase: str) -> str:
@@ -849,6 +863,36 @@ class FeishuStreamingCardMixin:
         if not turn.answer.rstrip(_CURSOR_CHARS).strip():
             turn.header_dirty = True
         return True
+
+    @staticmethod
+    def _note_speed(turn: StreamCardTurn, text: str) -> None:
+        """Sample the estimated token count of the answer landed so far (live decode rate)."""
+        tokens = estimate_tokens(text)
+        if tokens == turn.speed_tokens and turn.speed_samples:
+            return
+        turn.speed_tokens = tokens
+        turn.speed_samples.append((time.monotonic(), tokens))
+
+    @staticmethod
+    def _live_speed(turn: StreamCardTurn) -> float:
+        """Tokens per second over the newest samples; 0 until the window spans enough time."""
+        now = time.monotonic()
+        samples = [(t, n) for t, n in turn.speed_samples if now - t <= SPEED_WINDOW_SECONDS]
+        if len(samples) < 2:
+            return 0.0
+        (t0, n0), (t1, n1) = samples[0], samples[-1]
+        if n1 <= n0 or t1 - t0 < SPEED_MIN_SPAN_SECONDS or now - t1 > SPEED_MAX_IDLE_SECONDS:
+            return 0.0
+        return (n1 - n0) / (t1 - t0)
+
+    def _speed(self, turn: StreamCardTurn, phase: str) -> str:
+        """The live rate while running; the official per-turn rate once the turn is over."""
+        measured = turn.metrics.get("speed")
+        if phase not in ACTIVE_PHASES:
+            if isinstance(measured, (int, float)):
+                return format_speed(float(measured))
+            return format_speed(self._live_speed(turn))
+        return format_speed(self._live_speed(turn))
 
     def _card(self, turn: StreamCardTurn, phase: str, markdown: str, *, streaming: Optional[bool] = None,
               timeline_lines: int = TIMELINE_MAX_LINES, timeline_bytes: int = TIMELINE_MAX_BYTES,

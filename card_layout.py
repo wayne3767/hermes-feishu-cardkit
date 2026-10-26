@@ -9,7 +9,8 @@ calls into these functions with plain data.  Layout of a completed card:
     answer      prose markdown; each figure (image + ``图N　标题`` caption) is its own centred
                 element; each table gets a centred ``表N　标题`` element above it
     hr
-    footer      "⏳ 思考中 · 8s" → "✅ 已完成 · 32s · <model>"; token/context usage is opt-in
+    footer      "⏳ 思考中 · 8s" → "⏳ 生成中 · 45s · 31 tok/s · <model>" →
+                "✅ 已完成 · 1m12s · 34 tok/s · <model>"; token/context usage is opt-in
 
 While streaming, the answer is ONE markdown element (``ANSWER_ELEMENT_ID``) so the CardKit
 text-stream API has a stable target; the split into figures / tables happens on the final
@@ -25,6 +26,7 @@ interface and shares no code with it beyond the wording and ``format_duration``.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -226,6 +228,43 @@ def format_duration(seconds: float) -> str:
     return f"{secs}s"
 
 
+def format_speed(tokens_per_second: float) -> str:
+    """Decode rate as ``31 tok/s`` (one decimal below 10); empty when there is no usable rate."""
+    try:
+        value = float(tokens_per_second)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(value) or value <= 0:
+        return ""
+    return f"{value:.1f} tok/s" if value < 10 else f"{value:.0f} tok/s"
+
+
+def _is_cjk(char: str) -> bool:
+    code = ord(char)
+    return (0x3040 <= code <= 0x30FF or 0x3400 <= code <= 0x4DBF or 0x4E00 <= code <= 0x9FFF
+            or 0xF900 <= code <= 0xFAFF or 0x3000 <= code <= 0x303F or 0xAC00 <= code <= 0xD7AF)
+
+
+def estimate_tokens(text: str) -> int:
+    """Approximate token count for the live decode-speed estimate.
+
+    CJK characters and punctuation count as one token each, runs of other letters and digits as
+    one token per four characters (whitespace ignored).  It only has to move with the real count:
+    the exact figure comes from official usage once a call finishes.
+    """
+    tokens = latin = 0
+    for char in text:
+        if _is_cjk(char):
+            tokens += (latin + 3) // 4 + 1
+            latin = 0
+        elif char.isalnum():
+            latin += 1
+        else:
+            tokens += (latin + 3) // 4
+            latin = 0
+    return tokens + (latin + 3) // 4
+
+
 def render_answer(markdown: str) -> str:
     """Answer markdown as the streaming card shows it: complete LaTeX formulas become Unicode
     math text; an unclosed formula at the end of a frame stays raw until it closes."""
@@ -265,18 +304,21 @@ def timeline_title(tool_count: int, labels: Labels = ZH, reading_preset: str = "
 
 def render_footer(*, phase: str, tool_count: int, elapsed: float, model: str = "", activity: str = "",
                   labels: Labels = ZH, metrics: Optional[Dict[str, Any]] = None, status: str = "",
-                  show_usage: bool = False) -> str:
-    """One footer line: status · elapsed · model (· usage when opted in).
+                  show_usage: bool = False, speed: str = "") -> str:
+    """One footer line: status · elapsed · decode speed · model (· usage when opted in).
 
     ``status`` carries the granular running word from ``status_label``; without it a running
-    footer falls back to 思考中, which is what a freshly seeded card is doing. ``tool_count`` and
-    ``activity`` are accepted for callers but no longer printed: the tool panel above the answer
-    already names the count and the calls. Token/context usage needs ``show_usage``.
+    footer falls back to 思考中, which is what a freshly seeded card is doing. ``speed`` is the
+    already formatted rate (``format_speed``). ``tool_count`` and ``activity`` are accepted for
+    callers but no longer printed: the tool panel above the answer already names the count and
+    the calls. Token/context usage needs ``show_usage``.
     """
     del tool_count, activity
     word = status or status_label(phase, labels)
     parts = [f"{'✅' if phase == PHASE_DONE else '⏹' if phase == PHASE_STOPPED else '⏳'} {word}",
              format_duration(elapsed)]
+    if speed:
+        parts.append(speed)
     if model:
         parts.append(model)
     if metrics:
@@ -633,7 +675,7 @@ __all__ = [
     "TIMELINE_SLIM_LINES", "TIMELINE_SLIM_BYTES",
     "ACTIVITY_MAX_CHARS", "PHASE_RUNNING", "PHASE_DONE", "PHASE_STOPPED", "ImageItem", "Labels", "ZH", "EN", "labels_for",
     "utf8_len", "truncate_utf8", "json_text_bytes", "card_json_bytes", "clip_markdown_head", "clip_markdown_tail",
-    "format_duration", "render_answer", "summary_for", "render_timeline", "status_label",
+    "format_duration", "format_speed", "estimate_tokens", "render_answer", "summary_for", "render_timeline", "status_label",
     "timeline_title", "render_footer", "title_from_filename", "image_block", "append_images", "place_images",
     "layout_answer_elements", "table_component", "build_stream_card", "STOP_BUTTON_ID", "STOP_ACTION",
     "MARKDOWN_TABLE_ROWS", "TABLE_PAGE_SIZE", "MAX_TABLE_COMPONENTS", "timeline_update_actions", "footer_update_actions",

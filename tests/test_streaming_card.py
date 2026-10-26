@@ -191,7 +191,8 @@ class TestFrameParsing:
 
     def test_footer_and_duration(self):
         assert cl.format_duration(32.4) == "32s" and cl.format_duration(177) == "2m57s"
-        assert cl.render_footer(phase="done", tool_count=4, elapsed=32, model="m") == "✅ 已完成 · 32s · m"
+        assert cl.render_footer(phase="done", tool_count=4, elapsed=32, model="m",
+                                speed="31 tok/s") == "✅ 已完成 · 32s · 31 tok/s · m"
         assert cl.render_footer(phase="running", tool_count=0, elapsed=3) == "⏳ 思考中 · 3s"
         assert cl.render_footer(phase="running", tool_count=1, elapsed=8,
                                 status=cl.ZH.tooling) == "⏳ 调用工具中 · 8s"
@@ -201,6 +202,13 @@ class TestFrameParsing:
         assert cl.render_footer(phase="done", tool_count=0, elapsed=5, metrics=usage) == "✅ 已完成 · 5s · m"
         assert cl.render_footer(phase="done", tool_count=0, elapsed=5, metrics=usage, show_usage=True) == (
             "✅ 已完成 · 5s · m · p · ↑12 · ↓3 · 上下文 12/100 (12%)"), "usage is opt-in"
+
+    def test_speed_and_token_estimate(self):
+        assert cl.format_speed(31.4) == "31 tok/s" and cl.format_speed(8.44) == "8.4 tok/s"
+        assert cl.format_speed(0) == "" and cl.format_speed(float("nan")) == "" and cl.format_speed(None) == ""
+        assert cl.estimate_tokens("") == 0
+        assert cl.estimate_tokens("你好 world") == 4, "2 CJK + ceil(5/4)"
+        assert cl.estimate_tokens("delta_p = 1.45") == 5, "letter/digit runs → ceil(n/4)"
 
     def test_status_label_tracks_what_the_turn_is_doing(self):
         assert cl.status_label("running") == "思考中"
@@ -289,6 +297,34 @@ class TestTurnLifecycle:
         assert seqs == sorted(seqs) and len(set(seqs)) == 2, "footer refreshes may sit between answer pushes"
         assert all(p.card_id == CARD_ID and p.element_id == cl.ANSWER_ELEMENT_ID for p in pushes)
         assert len({p.request_body.uuid for p in pushes}) == 2
+
+    def test_footer_shows_a_live_decode_rate_between_time_and_model(self):
+        adapter, _fake = _adapter()
+        turn = fs.StreamCardTurn(card_id="c", message_id="m", chat_id=CHAT)
+        turn.answer = "已经生成的正文内容"
+        now = time.monotonic()
+        turn.speed_samples.extend([(now - 3.0, 100), (now, 280)])
+        footer = adapter._footer(turn, fs.PHASE_RUNNING)
+        assert footer.startswith("⏳ 生成中 · 0s · 60 tok/s"), footer
+        turn.metrics = {"speed": 42.0, "model": "m"}
+        assert adapter._footer(turn, fs.PHASE_DONE) == "✅ 已完成 · 0s · 42 tok/s · m", "official rate wins when done"
+
+    def test_live_decode_rate_reaches_the_footer_while_text_streams(self, monkeypatch):
+        monkeypatch.setattr(fs, "SPEED_MIN_SPAN_SECONDS", 0.01)
+        monkeypatch.setattr(fs, "FOOTER_TICK_SECONDS", 0.0)
+        adapter, fake = _adapter()
+
+        async def _scenario():
+            await adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1")
+            await adapter.send_stream_frame("第一段已经生成的正文", chat_id=CHAT, turn_id="t1")
+            await asyncio.sleep(0.05)
+            await adapter.send_stream_frame("第一段已经生成的正文，第二段继续输出更多内容。", chat_id=CHAT, turn_id="t1")
+
+        _run(_scenario())
+        actions = json.loads(fake.named("batch")[-1].request_body.actions)
+        footer = next(a for a in actions if a["params"]["element_id"] == cl.FOOTER_ELEMENT_ID)
+        content = footer["params"]["partial_element"]["content"]
+        assert content.startswith("⏳ 生成中 · ") and "tok/s" in content, content
 
     def test_running_status_moves_from_thinking_to_tools_to_generating(self):
         adapter, fake = _adapter()

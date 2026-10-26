@@ -132,7 +132,8 @@ def write_previews(output: Path, *, config_path: Path | None = None) -> dict[str
     cards = {}
     for phase in PHASES:
         status = cl.status_label(phase, has_answer=True, has_tools=True)
-        footer = cl.render_footer(phase=phase, tool_count=2, elapsed=42, metrics=metrics, status=status)
+        footer = cl.render_footer(phase=phase, tool_count=2, elapsed=42, metrics=metrics, status=status,
+                                  speed=cl.format_speed(31.4))
         cards[phase] = cl.build_stream_card(
             title="Hermes · 离线示例", markdown=answer, timeline_md=timeline,
             tool_count=2, footer=footer, phase=phase, status=status, stop_button=True, **resolved["values"],

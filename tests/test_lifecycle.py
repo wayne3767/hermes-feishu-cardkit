@@ -91,6 +91,16 @@ def test_declared_model_is_a_fallback_until_a_served_model_arrives():
     assert metrics.snapshot()["model"] == "served-model", "the served model wins"
 
 
+def test_decode_speed_uses_streaming_time_not_the_whole_call():
+    metrics = TurnMetrics()
+    assert metrics.record(api_request_id="a", usage={"prompt_tokens": 100, "output_tokens": 200},
+                          first_chunk_at=10.5, ended_at=14.5, api_duration=9.0)
+    assert metrics.snapshot()["speed"] == 50.0, "200 tokens over 4s of streaming, TTFT excluded"
+    no_usage = TurnMetrics()
+    assert no_usage.record(api_request_id="b", api_duration=4.0)
+    assert "speed" not in no_usage.snapshot(), "an unknown output count has no rate"
+
+
 def test_context_is_latest_request_not_turn_sum_and_handles_out_of_order():
     metrics = TurnMetrics()
     for rid, sequence, prompt in (("new", 2, 200), ("old", 1, 100)):
