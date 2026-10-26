@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1 — 2026-10-27
+
+- Fix a Hermes 0.22+ regression: the plugin replaced the bundled Feishu registry entry without
+  forwarding its `env_overrides` / `env_enable_credentials` declarations, so a profile that relied
+  on `FEISHU_APP_ID` in `.env` (0.21 force-enabled the platform from the bundled rows) ended up with
+  the platform enabled but `validate_config` failing — the gateway logged
+  "Platform 'Feishu / Lark' config validation failed" and Feishu never connected. The plugin now
+  mirrors the bundled declarations when the running Hermes exposes those fields, and still passes
+  nothing on older versions.
+- Server upgrade note: on 0.22.x a config that wrote `platforms.feishu` without `enabled` can also
+  set `enabled: true` explicitly; both paths now work.
+
 ## 0.5.0 — 2026-10-27
 
 - Move the tool panel to the top of the card body, directly under the header and above the answer,

@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("hermes_feishu_cardkit")
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 # Registry metadata mirrored from the bundled entry (plain values; the callables are proxied lazily).
 _STATIC_ENTRY = dict(
@@ -26,6 +26,33 @@ _STATIC_ENTRY = dict(
     allow_all_env="FEISHU_ALLOW_ALL_USERS", cron_deliver_env_var="FEISHU_HOME_CHANNEL", max_message_length=8000,
     emoji="🪽", allow_update_command=True,
 )
+
+
+def _bundled_env_kwargs() -> Dict[str, Any]:
+    """Forward the bundled platform's env→config declarations to our registry entry.
+
+    Hermes 0.22+ decides whether a plugin platform is enabled from credentials in the profile
+    environment through ``PlatformEntry.env_overrides`` / ``env_enable_credentials``, and those
+    rows are also what copies ``FEISHU_APP_ID`` into ``platforms.feishu.extra.app_id``.  Replacing
+    the entry without them leaves the platform disabled on a config that relied on `.env` (0.21
+    enabled it from the bundled rows regardless), so mirror the bundled declarations instead of
+    duplicating them.  Older Hermes has no such fields: pass nothing.
+    """
+    try:
+        from gateway.platform_registry import PlatformEntry
+        fields = getattr(PlatformEntry, "__dataclass_fields__", None) or {}
+    except Exception:
+        return {}
+    if "env_overrides" not in fields:
+        return {}
+    try:
+        from plugins.platforms.feishu import gateway_env as bundled_env
+    except Exception:
+        return {}
+    return {
+        "env_overrides": tuple(getattr(bundled_env, "ENV_OVERRIDES", ()) or ()),
+        "env_enable_credentials": tuple(getattr(bundled_env, "ENV_ENABLE_CREDENTIALS", ()) or ()),
+    }
 _captured: Optional[Dict[str, Any]] = None
 
 
@@ -92,7 +119,7 @@ def register(ctx: Any) -> None:
         name="feishu", adapter_factory=build_adapter, check_fn=_deps_present,
         ensure_deps_fn=_proxy("ensure_deps_fn"), is_connected=_is_connected, validate_config=_is_connected,
         setup_fn=_proxy("setup_fn"), apply_yaml_config_fn=_proxy("apply_yaml_config_fn"),
-        standalone_sender_fn=_standalone_send, **_STATIC_ENTRY,
+        standalone_sender_fn=_standalone_send, **_STATIC_ENTRY, **_bundled_env_kwargs(),
     )
     # Observe official lifecycle events in supported Hermes versions; the transport remains
     # the bundled adapter subclass. Unsupported hooks leave ordinary cards fully usable.
