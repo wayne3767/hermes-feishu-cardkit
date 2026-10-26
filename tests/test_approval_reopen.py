@@ -8,6 +8,7 @@ from unittest.mock import patch
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
 from feishu_cardkit import approval_reopen
+from feishu_cardkit.card_layout import ACTIVITY_ELEMENT_ID
 from feishu_cardkit import streaming as fs
 from feishu_cardkit.adapter import CardkitFeishuAdapter as FeishuAdapter
 from test_streaming_card import _adapter, _elements, _ok, _run, CHAT
@@ -70,5 +71,5 @@ def test_real_consumer_reopens_a_card_after_the_approval_boundary():
     assert first_sealed["header"]["title"]["content"] == "本段已结束"
     final = fake.card_of(fake.named("update")[-1])
     assert _elements(final)[fs.ANSWER_ELEMENT_ID]["content"] == "第二段正文"
-    assert _elements(final)[fs.TIMELINE_SUMMARY_ID]["content"] == "思考与工具 · 1 次工具调用"
+    assert _elements(final)[ACTIVITY_ELEMENT_ID]["content"] == "工具调用已结束 · 1 次工具调用"
     assert str(getattr(adapter, "cardkit_approval_reopen", False)) == "True"

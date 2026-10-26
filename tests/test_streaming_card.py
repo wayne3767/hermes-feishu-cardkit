@@ -180,14 +180,9 @@ class TestFrameParsing:
         assert fs.merge_overlay(turn, ["a", "b"]) is True
         assert fs.merge_overlay(turn, []) is False  # delta cleared the overlay
         assert fs.merge_overlay(turn, ["c"]) is True  # fresh overlay after the clear
-        assert turn.timeline == ["a", "b", "c"]
+        assert turn.timeline == ["c"]
+        assert turn.tool_count == 3
 
-    def test_render_timeline_caps_lines_and_bytes(self):
-        lines = [f"🔧 tool {i}" for i in range(cl.TIMELINE_MAX_LINES + 10)]
-        md = cl.render_timeline(lines)
-        assert md.startswith("… 已省略 10 行")
-        assert md.endswith(lines[-1])
-        assert cl.render_timeline([]) == cl.ZH.timeline_empty
 
     def test_footer_and_duration(self):
         assert cl.format_duration(32.4) == "32s" and cl.format_duration(177) == "2m57s"
@@ -218,22 +213,20 @@ class TestFrameParsing:
         assert cl.status_label("waiting_input") == "等待输入"
 
     def test_card_layout_phases(self):
-        running = cl.build_stream_card(title="T", markdown="", timeline_md="x", tool_count=0, footer="f", phase="running")
+        running = cl.build_stream_card(title="T", markdown="", activity="x", tool_count=0, footer="f", phase="running")
         assert running["header"]["template"] == "blue" and running["config"]["streaming_mode"] is True
         els = _elements(running)
         assert els[cl.ANSWER_ELEMENT_ID]["content"] == cl.SEED_PLACEHOLDER
-        assert els[cl.TIMELINE_SUMMARY_ID]["content"] == "思考与工具 · 0 次工具调用"
-        assert els[cl.TIMELINE_TOGGLE_ID]["text"]["content"] == "展开"
-        assert cl.TIMELINE_ELEMENT_ID not in els, "the chain is only rendered while expanded"
-        done = cl.build_stream_card(title="T", markdown="a", timeline_md="x", tool_count=0, footer="f", phase="done")
+        assert els[cl.ACTIVITY_ELEMENT_ID]["content"] == "x"
+        assert all(e["tag"] != "button" for e in running["body"]["elements"])
+        done = cl.build_stream_card(title="T", markdown="a", activity="x", tool_count=0, footer="f", phase="done")
         assert done["header"]["template"] == "green" and done["config"]["streaming_mode"] is False
-        assert cl.TIMELINE_SUMMARY_ID not in _elements(done), "no tool line on a tool-free completed card"
-        done_tools = cl.build_stream_card(title="T", markdown="a", timeline_md="x", tool_count=2, footer="f", phase="done")
-        assert _elements(done_tools)[cl.TIMELINE_SUMMARY_ID]["content"] == "思考与工具 · 2 次工具调用"
-        expanded = cl.build_stream_card(title="T", markdown="a", timeline_md="x", tool_count=2, footer="f",
-                                        phase="done", timeline_expanded=True)
-        assert _elements(expanded)[cl.TIMELINE_ELEMENT_ID]["content"] == "x"
-        assert _elements(expanded)[cl.TIMELINE_TOGGLE_ID]["text"]["content"] == "收起"
+        assert cl.ACTIVITY_ELEMENT_ID not in _elements(done), "no tool line on a tool-free completed card"
+        done_tools = cl.build_stream_card(title="T", markdown="a", activity="x", tool_count=2, footer="f", phase="done")
+        assert _elements(done_tools)[cl.ACTIVITY_ELEMENT_ID]["content"] == "工具调用已结束 · 2 次工具调用"
+        expanded = cl.build_stream_card(title="T", markdown="a", activity="x", tool_count=2, footer="f",
+                                        phase="done")
+        assert _elements(expanded)[cl.ACTIVITY_ELEMENT_ID]["content"] == "工具调用已结束 · 2 次工具调用"
 
 
 # --- probe -----------------------------------------------------------------------------------
@@ -309,42 +302,12 @@ class TestTurnLifecycle:
     def test_average_rate_covers_a_turn_whose_text_lands_in_one_frame(self):
         adapter, _fake = _adapter()
         turn = fs.StreamCardTurn(card_id="c", message_id="m", chat_id=CHAT)
-        turn.speed_tokens, turn.decode_seconds = 300, 6.0
-        assert adapter._footer(turn, fs.PHASE_DONE) == "✅ 已完成 · 0s · 50 tok/s"
+        turn.decode_tokens, turn.decode_seconds = 300, 6.0
+        assert adapter._footer(turn, fs.PHASE_DONE) == "✅ 已完成 · 0s · ≈ 50 tok/s"
         turn.decode_seconds = 0.0
         assert "tok/s" not in adapter._footer(turn, fs.PHASE_DONE), "no decode time, no invented rate"
 
-    def test_timeline_button_expands_and_collapses_the_chain(self):
-        adapter, fake = _adapter()
-        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
-        _run(adapter.send_stream_frame(SEP + "🔍 Searching▌", chat_id=CHAT, turn_id="t1"))
-        turn = adapter._stream_cards[f"{CHAT}:t1"]
-        assert cl.TIMELINE_ELEMENT_ID not in _elements(fake.card_of(fake.named("create")[0]))
-        assert _run(adapter.apply_timeline_toggle(turn.message_id)) is True
-        expanded = _elements(fake.card_of(fake.named("update")[-1]))
-        assert expanded[cl.TIMELINE_ELEMENT_ID]["content"] == "🔍 Searching"
-        assert expanded[cl.TIMELINE_TOGGLE_ID]["text"]["content"] == "收起"
-        assert _run(adapter.apply_timeline_toggle(turn.message_id)) is True
-        collapsed = _elements(fake.card_of(fake.named("update")[-1]))
-        assert cl.TIMELINE_ELEMENT_ID not in collapsed, "the chain is gone, not merely hidden"
-        assert collapsed[cl.TIMELINE_TOGGLE_ID]["text"]["content"] == "展开"
 
-    def test_timeline_action_is_dispatched_to_the_toggle(self):
-        adapter, fake = _adapter()
-        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
-        turn = adapter._stream_cards[f"{CHAT}:t1"]
-        loop = asyncio.new_event_loop()
-        adapter._loop = loop
-        scheduled = []
-        adapter._submit_on_loop = lambda lp, coro: scheduled.append(coro) or True
-        click = SimpleNamespace(event=SimpleNamespace(
-            action=SimpleNamespace(value=dict(cl.TIMELINE_ACTION)),
-            context=SimpleNamespace(open_message_id=turn.message_id)))
-        adapter._on_card_action_trigger(click)
-        assert scheduled, "the click is applied on the adapter loop"
-        loop.run_until_complete(scheduled[0])
-        loop.close()
-        assert adapter._panel_expanded(turn.card_id) is True
 
     def test_header_shows_the_status_instead_of_the_bot_name(self, monkeypatch):
         monkeypatch.setattr(fs, "_WATCHDOG_POLL_SECONDS", 0.01)
@@ -384,7 +347,7 @@ class TestTurnLifecycle:
         now = time.monotonic()
         turn.speed_samples.extend([(now - 3.0, 100), (now, 280)])
         footer = adapter._footer(turn, fs.PHASE_RUNNING)
-        assert footer.startswith("⏳ 生成中 · 0s · 60 tok/s"), footer
+        assert footer.startswith("⏳ 生成中 · 0s · ≈ 60 tok/s"), footer
         turn.metrics = {"speed": 42.0, "model": "m"}
         assert adapter._footer(turn, fs.PHASE_DONE) == "✅ 已完成 · 0s · 42 tok/s · m", "official rate wins when done"
 
@@ -428,8 +391,7 @@ class TestTurnLifecycle:
         (batch,) = fake.named("batch")
         actions = json.loads(batch.request_body.actions)
         by_id = {a["params"]["element_id"]: a["params"]["partial_element"] for a in actions}
-        assert by_id[cl.TIMELINE_SUMMARY_ID]["content"] == "思考与工具 · 1 次工具调用"
-        assert cl.TIMELINE_ELEMENT_ID not in by_id, "collapsed cards skip the chain (no element on screen)"
+        assert by_id[cl.ACTIVITY_ELEMENT_ID]["content"] == '🔍 Searching the web for "x"'
         assert by_id[cl.FOOTER_ELEMENT_ID]["content"].startswith("⏳ 调用工具中"), "the footer names what the turn is doing"
         # Text arrives: overlay clears, answer streams, timeline keeps the entry.
         _run(adapter.send_stream_frame("The answer▌", chat_id=CHAT, turn_id="t1"))
@@ -438,19 +400,22 @@ class TestTurnLifecycle:
         # Second tool after text (strategy B): stacked below the text, appended to the timeline.
         _run(adapter.send_stream_frame("The answer" + SEP + "💻 terminal\n```\nls\n```▌", chat_id=CHAT, turn_id="t1"))
         turn = adapter._stream_cards[f"{CHAT}:t1"]
-        assert turn.timeline == ['🔍 Searching the web for "x"', "💻 terminal", "```", "ls", "```"]
+        assert turn.timeline == ["💻 terminal"]
         assert turn.tool_count == 2
         assert len(fake.named("batch")) == 3
 
-    def test_batch_failure_falls_back_to_timeline_content_push(self):
+    def test_activity_update_failure_is_retried_on_the_next_frame(self):
         adapter, fake = _adapter()
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        fake.scripts["batch"] = [_fail(10002, "action is invalid"), _ok()]
+        text = SEP + "🔍 Searching▌"
+        _run(adapter.send_stream_frame(text, chat_id=CHAT, turn_id="t1"))
         turn = adapter._stream_cards[f"{CHAT}:t1"]
-        turn.card_id and adapter._card_expanded.__setitem__(turn.card_id, True)  # expanded: chain on screen
-        fake.scripts["batch"] = [_fail(10002, "action is invalid")]
-        _run(adapter.send_stream_frame(SEP + "🔍 Searching▌", chat_id=CHAT, turn_id="t1"))
-        assert fake.pushes(cl.TIMELINE_ELEMENT_ID) == ["🔍 Searching"]
-        assert fake.pushes(cl.TIMELINE_SUMMARY_ID) == ["思考与工具 · 1 次工具调用"]
+        assert turn.activity_dirty
+        _run(adapter.send_stream_frame(text, chat_id=CHAT, turn_id="t1"))
+        assert not turn.activity_dirty
+        actions = json.loads(fake.named("batch")[-1].request_body.actions)
+        assert actions[0]["params"]["partial_element"]["content"] == "🔍 Searching"
 
     def test_finalize_lands_text_then_seals_with_completed_layout(self):
         adapter, fake = _adapter()
@@ -467,9 +432,8 @@ class TestTurnLifecycle:
         assert card["header"]["title"]["content"] == "已完成"
         els = _elements(card)
         assert els[cl.ANSWER_ELEMENT_ID]["content"] == "Hello world"
-        assert els[cl.TIMELINE_SUMMARY_ID]["content"] == "思考与工具 · 1 次工具调用"
-        assert cl.TIMELINE_ELEMENT_ID not in els, "collapsed by default; the button reveals the chain"
-        assert els[cl.TIMELINE_TOGGLE_ID]["text"]["content"] == "展开"
+        assert els[cl.ACTIVITY_ELEMENT_ID]["content"] == "工具调用已结束 · 1 次工具调用"
+        assert not any(e["tag"] == "button" for e in card["body"]["elements"])
         assert els[cl.FOOTER_ELEMENT_ID]["content"].startswith("✅ 已完成 · ")
         assert "test-model" not in els[cl.FOOTER_ELEMENT_ID]["content"], "configured models are not execution evidence"
         assert card["config"]["summary"]["content"] == "Hello world"
@@ -499,7 +463,7 @@ class TestTurnLifecycle:
         assert adapter._stream_cards[f"{CHAT}:t1"].timeline == ["✅ 检查通过"]
         assert _run(adapter.send_stream_frame("✅ 检查通过，一切正常。", finalize=True, chat_id=CHAT, turn_id="t1")) is True
         card = fake.card_of(fake.named("update")[0])
-        assert cl.TIMELINE_PANEL_ID not in _elements(card), "no tool panel once the bogus entry is dropped"
+        assert cl.ACTIVITY_ELEMENT_ID not in _elements(card), "no tool panel once the bogus entry is dropped"
         assert "次工具调用" not in _elements(card)[cl.FOOTER_ELEMENT_ID]["content"]
 
     def test_first_content_frame_without_seed_opens_card_with_text(self):
@@ -731,14 +695,14 @@ class TestConsumerIntegration:
         answer_pushes = fake.pushes(cl.ANSWER_ELEMENT_ID)
         assert answer_pushes and answer_pushes[-1] == "Hello world"
         assert all("Searching" not in p and "---" not in p for p in answer_pushes), "tool lines never reach the answer"
-        (batch,) = [b for b in fake.named("batch") if "次工具调用" in b.request_body.actions]
-        assert "1 次工具调用" in batch.request_body.actions, "the one-line summary is what gets updated"
+        (batch,) = [b for b in fake.named("batch") if "Searching" in b.request_body.actions]
+        assert '🔍 Searching the web for \"feishu\"' in json.loads(batch.request_body.actions)[0]["params"]["partial_element"]["content"]
         update = fake.named("update")[-1]
         card = fake.card_of(update)
         assert card["header"]["template"] == "green"
         els = _elements(card)
         assert els[cl.ANSWER_ELEMENT_ID]["content"] == "Hello world"
-        assert els[cl.TIMELINE_SUMMARY_ID]["content"] == "思考与工具 · 1 次工具调用"
+        assert els[cl.ACTIVITY_ELEMENT_ID]["content"] == "工具调用已结束 · 1 次工具调用"
         seqs = [c.request_body.sequence for n, c in fake.calls if n in ("content", "batch", "update", "settings")]
         assert seqs == sorted(seqs) and len(seqs) == len(set(seqs))
         assert adapter._stream_cards == {}
@@ -967,13 +931,12 @@ class TestAnswerLayout:
     """Completed cards split the answer into prose, centred figures and captioned tables."""
 
     def test_tool_panel_leads_the_body_above_the_answer(self):
-        card = cl.build_stream_card(title="T", markdown="正文", timeline_md="🔍 a\n💻 b", tool_count=2,
+        card = cl.build_stream_card(title="T", markdown="正文", activity="🔍 a\n💻 b", tool_count=2,
                                     footer="f", phase="done", status=cl.ZH.done)
         elements = card["body"]["elements"]
-        assert elements[0]["element_id"] == cl.TIMELINE_SUMMARY_ID, "the tool line sits under the header"
+        assert elements[0]["element_id"] == cl.ACTIVITY_ELEMENT_ID, "the tool line sits under the header"
         assert "2 次工具调用" in elements[0]["content"]
-        assert elements[1]["element_id"] == cl.TIMELINE_TOGGLE_ID and elements[1]["text"]["content"] == "展开"
-        assert elements[2]["element_id"] == cl.ANSWER_ELEMENT_ID
+        assert elements[1]["element_id"] == cl.ANSWER_ELEMENT_ID
         assert card["header"]["title"]["content"] == "已完成"
 
     def test_figure_blocks_are_centred_and_prose_keeps_ids(self):
@@ -1011,11 +974,11 @@ class TestAnswerLayout:
         assert len(els) == 1 and els[0]["content"] == md
 
     def test_completed_card_uses_layout_but_running_card_does_not(self):
-        running = cl.build_stream_card(title="T", markdown="| a |\n|---|\n| 1 |", timeline_md="", tool_count=0, footer="f", phase="running")
-        assert [e.get("element_id") for e in running["body"]["elements"][:3]] == [
-            cl.TIMELINE_SUMMARY_ID, cl.TIMELINE_TOGGLE_ID, cl.ANSWER_ELEMENT_ID]
+        running = cl.build_stream_card(title="T", markdown="| a |\n|---|\n| 1 |", activity="", tool_count=0, footer="f", phase="running")
+        assert [e.get("element_id") for e in running["body"]["elements"][:2]] == [
+            cl.ACTIVITY_ELEMENT_ID, cl.ANSWER_ELEMENT_ID]
         assert "表1" not in json.dumps(running, ensure_ascii=False)
-        done = cl.build_stream_card(title="T", markdown="| a |\n|---|\n| 1 |", timeline_md="", tool_count=0, footer="f", phase="done")
+        done = cl.build_stream_card(title="T", markdown="| a |\n|---|\n| 1 |", activity="", tool_count=0, footer="f", phase="done")
         assert "表1" in json.dumps(done, ensure_ascii=False)
 
 
@@ -1112,7 +1075,7 @@ class TestLocale:
         running = fake.card_of(fake.named("create")[0])
         assert running["header"]["title"]["content"] == "Thinking" and running["config"]["summary"]["content"] == "Generating…"
         _run(adapter.send_stream_frame(SEP + "🔍 Searching▌", chat_id=CHAT, turn_id="t1"))
-        assert "1 tool calls" in fake.named("batch")[0].request_body.actions
+        assert "🔍 Searching" in fake.named("batch")[0].request_body.actions
         assert _run(adapter.send_stream_frame("Table 1: results\n| a |\n|---|\n| 1 |", finalize=True, chat_id=CHAT, turn_id="t1")) is True
         done = fake.card_of(fake.named("update")[0])
         assert done["header"]["title"]["content"] == "Done"
@@ -1175,7 +1138,7 @@ class TestIdleWatchdog:
                        if card["header"]["template"] == "blue" and card["config"]["streaming_mode"] is False)
         done = updates[-1]
         assert stopped["header"]["template"] == "grey"
-        assert _elements(revived)[cl.TIMELINE_SUMMARY_ID]["content"] == "思考与工具 · 1 次工具调用"
+        assert _elements(revived)[cl.ACTIVITY_ELEMENT_ID]["content"] == "💻 terminal"
         assert done["header"]["template"] == "green"
         assert _elements(done)[cl.ANSWER_ELEMENT_ID]["content"] == "思考中，结论如下。"
         assert len(fake.named("content")) == 1, "streaming mode is off after the seal: full updates only"
@@ -1263,25 +1226,7 @@ class TestCardSize:
         assert cl.clip_markdown_head(math, 400, "…").endswith("$$\n\n…")
         assert cl.clip_markdown_head("short", 100, "…") == "short"
 
-    def test_render_timeline_budgets(self):
-        lines = [f"🔧 tool {i}" for i in range(20)]
-        assert cl.render_timeline(lines, max_lines=0) == "… 已省略 20 行"
-        slim = cl.render_timeline(lines, max_lines=3, max_bytes=10_000)
-        assert slim.splitlines() == ["… 已省略 17 行", "🔧 tool 17", "🔧 tool 18", "🔧 tool 19"]
 
-    def test_timeline_gives_way_before_the_answer(self):
-        adapter, fake = _adapter()
-        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
-        turn = adapter._stream_cards[f"{CHAT}:t1"]
-        adapter._card_expanded[turn.card_id] = True  # the chain is on screen: it must give way
-        turn.timeline = [f"💻 terminal {i} " + "参" * 45 for i in range(40)]  # ~6 KB of tool lines
-        final = "\n\n".join(["结论" * 60] * 60)  # ~21.8 KB: under CARD_MAX_BYTES, but not with the timeline
-        assert _run(adapter.send_stream_frame(final, finalize=True, chat_id=CHAT, turn_id="t1")) is True
-        update = fake.named("update")[-1]
-        assert cl.utf8_len(update.request_body.card.data) <= cl.CARD_JSON_MAX_BYTES
-        els = _elements(fake.card_of(update))
-        assert els[cl.ANSWER_ELEMENT_ID]["content"] == final, "answer intact"
-        assert els[cl.TIMELINE_SUMMARY_ID]["content"] == "思考与工具 · 40 次工具调用"
 
     def test_escaping_heavy_answer_is_clipped_and_handed_back(self):
         adapter, fake = _adapter()

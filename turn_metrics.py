@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import re
+import time
 from typing import Any
 
 
@@ -16,10 +17,16 @@ def _count(value: Any) -> int | None:
 
 
 def _seconds(value: Any) -> float | None:
-    """A usable, bounded duration in seconds (event stamps and API durations share this)."""
+    """A usable, bounded duration in seconds; epoch timestamps are parsed separately."""
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
         return None
     return float(value) if 0 <= value <= 86_400 else None
+
+
+def _timestamp(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+        return float(value)
+    return None
 
 
 def _label(value: Any) -> str:
@@ -38,6 +45,9 @@ class TurnMetrics:
     _model: str = ""
     _declared_model: str = ""  # the model pre_llm_call said this session will call with
     _decode_seconds: float = 0.0  # time spent streaming output (TTFT excluded when known)
+    _decode_tokens: int = 0
+    _speed_estimated: bool = False
+    _speed_updated_at: float = 0.0
     _provider: str = ""
     _used: int | None = None
     _capacity: int | None = None
@@ -68,6 +78,10 @@ class TurnMetrics:
         decode = self._decode_duration(first_chunk_at, ended_at, api_duration)
         if output is not None and decode:
             self._decode_seconds += decode
+            self._decode_tokens += output
+            self._speed_updated_at = time.monotonic()
+            first, ended = _timestamp(first_chunk_at), _timestamp(ended_at)
+            self._speed_estimated |= first is None or ended is None or not 0 < ended - first <= 86_400
         stamp = float(started_at) if isinstance(started_at, (int, float)) else 0.0
         order = (stamp, _count(api_call_count) or 0)
         if order >= self._latest_order:
@@ -80,8 +94,8 @@ class TurnMetrics:
     @staticmethod
     def _decode_duration(first_chunk_at: Any, ended_at: Any, api_duration: Any) -> float:
         """Streaming time for one call: from the first chunk to the end, else the call duration."""
-        first, ended = _seconds(first_chunk_at), _seconds(ended_at)
-        if first is not None and ended is not None and ended > first:
+        first, ended = _timestamp(first_chunk_at), _timestamp(ended_at)
+        if first is not None and ended is not None and 0 < ended - first <= 86_400:
             return ended - first
         duration = _seconds(api_duration)
         return duration if duration and duration > 0 else 0.0
@@ -114,8 +128,10 @@ class TurnMetrics:
             tokens["output_tokens"] = self._output
         if tokens:
             result["tokens"] = tokens
-        if self._output and self._decode_seconds > 0:
-            result["speed"] = self._output / self._decode_seconds  # tokens per second, per turn
+        if self._decode_tokens and self._decode_seconds > 0:
+            result["speed"] = self._decode_tokens / self._decode_seconds
+            result["speed_estimated"] = self._speed_estimated
+            result["speed_updated_at"] = self._speed_updated_at
         if self._used is not None and self._capacity:
             result["context"] = {"used_tokens": self._used, "max_tokens": self._capacity}
         return result

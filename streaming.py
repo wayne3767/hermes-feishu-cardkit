@@ -11,7 +11,7 @@ Contract with ``GatewayStreamConsumer`` (gateway/stream_consumer_transport.py):
 - the empty seed frame opens the card (typing before the first token);
 - intermediate frames are cumulative and fire-and-forget (a later frame overwrites); the consumer
   composes them as ``answer + "\\n\\n---\\n" + tool-progress lines`` and ``split_stream_frame``
-  takes that apart again so tool lines land in the timeline panel;
+  takes that apart again so only the latest tool activity appears above the answer;
 - a ``finalize=True`` frame must either land the text or return False so the consumer's
   send()/edit fallback delivers exactly once;
 - ``finalize`` on an unknown turn returns False (never seed-and-close).
@@ -22,8 +22,8 @@ the positions are known), captioned ``图N　标题``.
 
 Limits: CardKit allows 10 updates/s per card and auto-closes streaming after 10 minutes; past
 that window a turn keeps updating the same card with full ``card.update`` writes (no typewriter).
-Card JSON is capped at 30 KB by Feishu: every card is measured as serialized, the tool timeline
-gives way first, then the answer is cut at a paragraph boundary; a final that no longer fits is
+Card JSON is capped at 30 KB by Feishu: every card is measured as serialized, and
+an oversized answer is cut at a paragraph boundary; a final that no longer fits is
 handed back to the consumer (return False) and goes out as ordinary chunked messages below the card.
 The final seal retries, then falls back to a slimmer card, so a card is not left "生成中".
 
@@ -51,13 +51,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import unquote
 
 from .card_layout import (
-    ACTIVITY_MAX_CHARS, ACTIVE_PHASES, ANSWER_ELEMENT_ID, CARD_JSON_MAX_BYTES, CARD_MAX_BYTES, DEFAULT_CARD_TITLE, PHASE_DONE,
+    ACTIVITY_MAX_CHARS, ACTIVE_PHASES, ANSWER_ELEMENT_ID, CARD_JSON_MAX_BYTES, CARD_MAX_BYTES, PHASE_DONE,
     PHASE_RUNNING, PHASE_STOPPED, PHASE_UNKNOWN, PHASE_WAITING_APPROVAL, PHASE_WAITING_INPUT,
-    PHASE_BLOCKED, PHASE_TIMEOUT, PHASE_FAILED, PHASE_SEGMENT, TIMELINE_ELEMENT_ID, TIMELINE_MAX_BYTES, TIMELINE_MAX_LINES,
-    TIMELINE_SLIM_BYTES, TIMELINE_SUMMARY_ID, timeline_title,
-    TIMELINE_SLIM_LINES, ImageItem, Labels, append_images, build_stream_card, card_json_bytes, clip_markdown_head,
+    PHASE_BLOCKED, PHASE_TIMEOUT, PHASE_FAILED, PHASE_SEGMENT, ImageItem, Labels, append_images, build_stream_card, card_json_bytes, clip_markdown_head,
     clip_markdown_tail, estimate_tokens, footer_update_actions, format_speed, json_text_bytes, labels_for, place_images,
-    render_answer, render_footer, render_timeline, status_label, summary_for, timeline_update_actions, utf8_len,
+    render_answer, render_footer, render_activity, status_label, summary_for, activity_update_actions, utf8_len,
 )
 from . import approval_reopen
 from .math_image import formula_digest, mathtext_available, render_formula_png
@@ -97,7 +95,7 @@ _REVIVE_TTL_SECONDS = 1800.0
 # The final full update is retried after these delays before the slimmer fallbacks.
 FINAL_UPDATE_RETRY_DELAYS = (1.0, 3.0)
 # Headroom kept for tool lines that arrive after the last answer push.
-_TIMELINE_GROWTH_RESERVE = 1024
+_ACTIVITY_GROWTH_RESERVE = 1024
 # Live decode speed: a windowed estimate over the answer text landed so far; official usage
 # replaces it once a call finishes.  ``decode_seconds`` accumulates only the gaps between frames
 # that actually grew the answer, so tool time never drags the average down.
@@ -108,15 +106,13 @@ SPEED_MAX_GAP_SECONDS = 10.0  # a longer gap between text frames is tool time, n
 SPEED_AVERAGE_MIN_SECONDS = 0.5
 # The footer (status, elapsed, speed) refreshes at most this often while text streams.
 FOOTER_TICK_SECONDS = 2.0
-# message_id → turn index for the expand/collapse button (cards outlive their turn)
-_TURN_INDEX_MAX = 128
 FORMULA_IMAGE_WAIT_SECONDS = 8.0  # finalize waits this long for in-flight formula uploads
 _THREAD_CACHE_MAX = 512
 _FORMULA_IMAGE_CACHE_MAX = 256
 # GatewayStreamConsumer._compose_frame_content joins answer and tool-progress lines with this.
 _PROGRESS_SEPARATOR = "\n\n---\n"
 # Interim frames end with the consumer's cursor (▌ by default); it lands after the overlay.
-_CURSOR_CHARS = "▌▍▎▏█▊▋"
+_CURSOR_CHARS = "▌▍▎▏█▉▊▋"
 # Tool-progress lines open with the tool emoji (get_tool_emoji / friendly verbs: 🔍 💻 📖 ⚙️ …).
 _EMOJI_RANGES = ((0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2300, 0x23FF), (0x2B00, 0x2BFF), (0x2190, 0x21FF), (0x2900, 0x297F))
 
@@ -131,7 +127,13 @@ class StreamCardTurn:
     chat_id: str
     sequence: int = 0
     answer: str = ""  # last answer text landed in the answer element (cursor included)
-    timeline: List[str] = field(default_factory=list)  # every tool-progress line seen this turn
+    timeline: List[str] = field(default_factory=list)  # latest fallback activity only, never full history
+    tool_total: int = 0
+    tool_activity: str = ""
+    activity_kind: str = ""  # official thinking/tooling, or generating after new text
+    tools_observed: bool = False
+    activity_dirty: bool = False
+    finished_at: Optional[float] = None
     overlay: List[str] = field(default_factory=list)  # tool lines the consumer currently shows
     started_at: float = field(default_factory=time.monotonic)
     formula_tasks: Dict[str, "asyncio.Task[Optional[str]]"] = field(default_factory=dict)  # digest → upload
@@ -154,6 +156,7 @@ class StreamCardTurn:
     speed_samples: "deque[Tuple[float, int]]" = field(default_factory=lambda: deque(maxlen=48))
     speed_tokens: int = 0  # estimated tokens in the answer landed so far
     decode_seconds: float = 0.0  # time spent between frames that grew the answer
+    decode_tokens: int = 0
     metrics: Dict[str, Any] = field(default_factory=dict)
     observation_ref: Any = None
     observation_revision: int = -1
@@ -161,7 +164,6 @@ class StreamCardTurn:
     observation_lost: bool = False
     segment_finalized: bool = False
     footer_dirty: bool = False
-    controls_dirty: bool = False  # controls need a layout refresh without ending typewriter mode
     delivery_result: Any = None
     write_lock: Any = field(default_factory=asyncio.Lock, repr=False)
 
@@ -184,15 +186,17 @@ class StreamCardTurn:
 
     @property
     def elapsed(self) -> float:
-        return time.monotonic() - self.started_at
+        return max(0.0, (self.finished_at or time.monotonic()) - self.started_at)
 
     @property
     def tool_count(self) -> int:
-        return count_tool_entries(self.timeline)
+        return self.tool_total
 
     @property
     def activity(self) -> str:
         """Latest tool line outside code fences, trimmed for the footer."""
+        if self.tool_activity:
+            return self.tool_activity
         latest = ""
         for line, in_fence in _walk_fenced(self.timeline):
             if not in_fence and line:
@@ -292,7 +296,7 @@ def count_tool_entries(lines: List[str]) -> int:
 
 
 def merge_overlay(turn: StreamCardTurn, lines: List[str]) -> bool:
-    """Fold the frame's overlay into the turn timeline; True when new lines were added.
+    """Read the latest activity from the cumulative overlay; never keep its history.
 
     The consumer keeps overlay lines until the next text delta, so a later frame either extends
     the current overlay (append the tail) or starts a fresh one (append it all)."""
@@ -300,7 +304,13 @@ def merge_overlay(turn: StreamCardTurn, lines: List[str]) -> bool:
         return False
     new = lines[len(turn.overlay):] if turn.overlay and lines[:len(turn.overlay)] == turn.overlay else lines
     turn.overlay = list(lines)
-    turn.timeline.extend(new)
+    if not turn.tools_observed and new:
+        turn.tool_total += count_tool_entries(new)
+        headers = [line for line, fenced in _walk_fenced(new)
+                   if line.strip() and not fenced and not line.strip().startswith("```")]
+        turn.timeline = headers[-1:] or ["💻 terminal"]
+        turn.activity_kind = "tooling"
+        turn.activity_dirty = True
     return bool(new)
 
 
@@ -326,11 +336,7 @@ class FeishuStreamingCardMixin:
         if "_stream_cards" in self.__dict__:
             return
         self._stream_cards: Dict[str, StreamCardTurn] = {}  # "<chat>:<turn>" → open card
-        # card_id → whether the tool chain is on screen, and message_id → its turn, so the
-        # expand/collapse button can drive the layout from the server (the panel's own toggle
-        # could not be collapsed again inside a streaming card).
-        self._card_expanded: "OrderedDict[str, bool]" = OrderedDict()
-        self._turn_by_message: "OrderedDict[str, StreamCardTurn]" = OrderedDict()
+        self._opening_cards: Dict[str, asyncio.Task] = {}
         self._completed_cards: "OrderedDict[str, CompletedCard]" = OrderedDict()  # card_id → sealed card
         self._idle_sealed: "OrderedDict[str, StreamCardTurn]" = OrderedDict()  # key → idle-sealed turn
         self._observed_segments: "OrderedDict[str, StreamCardTurn]" = OrderedDict()
@@ -365,11 +371,24 @@ class FeishuStreamingCardMixin:
         key = f"{chat}:{kwargs.get('turn_id') or 'default'}"
         turn = self._stream_cards.get(key) or self._revive(key)
         if turn is None:
-            if finalize:
+            opening = self._opening_cards.get(key)
+            if finalize and opening is None:
                 logger.debug("[Feishu] send_stream_frame: no open card to finalize (key=%s)", key)
                 return False
-            return await self._open(chat, key, reply_to=reply_to, text=text,
-                                    revivable=bool(kwargs.get("turn_id"))) is not None
+            owner = opening is None
+            if owner:
+                opening = asyncio.create_task(self._open(chat, key, reply_to=reply_to, text=text,
+                                                        revivable=bool(kwargs.get("turn_id"))))
+                self._opening_cards[key] = opening
+            try:
+                turn = await asyncio.shield(opening)
+            finally:
+                if opening.done() and self._opening_cards.get(key) is opening:
+                    self._opening_cards.pop(key, None)
+            if turn is None:
+                return False
+            if owner or (not finalize and not text):
+                return True
         async with turn.write_lock:
             turn.last_frame_at = time.monotonic()
             self._observe_turn(turn)
@@ -382,6 +401,12 @@ class FeishuStreamingCardMixin:
     async def close_open_stream_cards(self) -> None:
         """Best-effort seal of every open card (disconnect / restart) so none stays "typing"."""
         self._init_streaming_cards()
+        opening = list(self._opening_cards.values())
+        for pending in opening:
+            pending.cancel()
+        if opening:
+            await asyncio.gather(*opening, return_exceptions=True)
+        self._opening_cards.clear()
         segments, self._observed_segments = list(self._observed_segments.values()), OrderedDict()
         for segment in segments:
             await self._retire_segment_observer(segment)
@@ -389,7 +414,10 @@ class FeishuStreamingCardMixin:
         for turn in turns:
             turn.cancel_background()
             try:
-                await self._seal(turn, self._card(turn, PHASE_STOPPED, render_answer(turn.answer.rstrip(_CURSOR_CHARS))))
+                async with turn.write_lock:
+                    turn.phase = PHASE_STOPPED
+                    turn.finished_at = time.monotonic()
+                    await self._seal(turn, self._card(turn, PHASE_STOPPED, render_answer(turn.answer.rstrip(_CURSOR_CHARS))))
             except Exception as exc:
                 logger.debug("[Feishu] streaming card %s close on shutdown failed: %s", turn.card_id, exc)
 
@@ -506,7 +534,6 @@ class FeishuStreamingCardMixin:
             return None
         turn.card_id, turn.message_id, turn.answer, turn.answer_clipped = card_id, result.message_id or "", answer, clipped
         turn.status_word = self._status(turn, PHASE_RUNNING)  # what the seed card already shows
-        self._remember_card(turn)
         self._note_speed(turn, answer)
         turn.delivery_result = result
         turn.thread_id = thread_id
@@ -530,7 +557,7 @@ class FeishuStreamingCardMixin:
         turn = self._idle_sealed.pop(key, None)
         if turn is None or time.monotonic() - (turn.sealed_at or 0.0) > _REVIVE_TTL_SECONDS:
             return None
-        turn.sealed_at, turn.stop_requested_at = None, None
+        turn.sealed_at, turn.stop_requested_at, turn.finished_at = None, None, None
         turn.streaming_closed = turn.dirty = True
         turn.revivals += 1
         turn.last_frame_at = time.monotonic()
@@ -542,67 +569,54 @@ class FeishuStreamingCardMixin:
     async def _push(self, turn: StreamCardTurn, text: str) -> bool:
         """Cumulative intermediate frame; failures are fire-and-forget (the next frame overwrites)."""
         answer, overlay = split_stream_frame(text, turn.answer)
-        timeline_changed = merge_overlay(turn, overlay)
+        activity_changed = merge_overlay(turn, overlay)
         if turn.stale and not turn.streaming_closed:
             turn.streaming_closed = True
             logger.info("[Feishu] streaming card %s passed the streaming window; continuing with full updates", turn.card_id)
-        if turn.dirty or turn.phase != PHASE_RUNNING:
+        if turn.phase != PHASE_RUNNING:
             turn.streaming_closed = True
         if turn.streaming_closed:
-            return await self._push_full(turn, answer or turn.answer, timeline_changed)
+            return await self._push_full(turn, answer or turn.answer, activity_changed)
         if answer and answer != turn.answer:
             view, clipped = self._answer_view(turn, answer)
             if await self._push_element(turn, ANSWER_ELEMENT_ID, view):
                 turn.answer, turn.answer_clipped = answer, clipped
+                if not overlay:
+                    turn.activity_kind = "generating"
             self._prefetch_formula_images(turn, answer)
         self._note_status(turn)
         self._note_speed(turn, turn.answer)
         if time.monotonic() - turn.footer_at >= FOOTER_TICK_SECONDS:
             turn.footer_dirty = True  # keep the elapsed time and the decode rate moving
-        if turn.controls_dirty:
-            # The official turn identity can arrive after the seed. Adding its Stop
-            # button requires a full layout, but is not a reason to end streaming.
-            view, _ = self._answer_view(turn, turn.answer)
-            card, _ = self._fit_card(turn, turn.phase, view, streaming=True)
-            if await self._replace(turn, card, level=logging.DEBUG):
-                turn.controls_dirty = turn.footer_dirty = turn.header_dirty = False
-                turn.status_word = self._status(turn, turn.phase)
+        if activity_changed or turn.activity_dirty:
+            activity = render_activity(turn.activity, phase=turn.phase, tool_count=turn.tool_count, labels=self._labels)
+            if await self._batch_update(turn, activity_update_actions(activity, self._footer(turn, turn.phase))):
+                turn.activity_dirty = turn.footer_dirty = False
                 turn.footer_at = time.monotonic()
-                return True
-        if timeline_changed:
-            labels = self._labels
-            footer = self._footer(turn, turn.phase)
-            expanded = self._panel_expanded(turn.card_id)
-            rendered = render_timeline(turn.timeline, labels)
-            actions = timeline_update_actions(turn.tool_count, rendered, footer, labels,
-                                              self._reading_settings()["reading_preset"], expanded=expanded)
-            if not await self._batch_update(turn, actions):
-                await self._push_element(turn, TIMELINE_SUMMARY_ID,
-                                         timeline_title(turn.tool_count, labels))
-                if expanded:
-                    await self._push_element(turn, TIMELINE_ELEMENT_ID, rendered)
             else:
-                turn.footer_dirty = False
-                turn.footer_at = time.monotonic()
+                # Keep the owed update for the next frame/watchdog, including when no text follows.
+                turn.activity_dirty = True
         elif turn.footer_dirty:
             if await self._batch_update(turn, footer_update_actions(self._footer(turn, turn.phase))):
                 turn.footer_dirty, turn.footer_at = False, time.monotonic()
         return True
 
-    async def _push_full(self, turn: StreamCardTurn, answer: str, timeline_changed: bool) -> bool:
+    async def _push_full(self, turn: StreamCardTurn, answer: str, activity_changed: bool) -> bool:
         """Frame for a card whose streaming mode is off (past CardKit's window, or revived): the
         whole running layout goes out as one ``card.update`` — no typewriter, same card, and
         at the consumer's edit pace (~1/s) well inside CardKit's 10 updates/s per card."""
-        if (answer == turn.answer and not timeline_changed and not turn.dirty
-                and not turn.controls_dirty and not turn.footer_dirty and not turn.header_dirty):
+        if (answer == turn.answer and not activity_changed and not turn.dirty
+                and not turn.activity_dirty and not turn.footer_dirty and not turn.header_dirty):
             return True
         view, clipped = self._answer_view(turn, answer, streaming=False)
         previous = turn.answer
         turn.answer = answer  # the card is built from this frame, so its status word must be too
+        if answer != previous and not turn.overlay:
+            turn.activity_kind = "generating"
         card, _ = self._fit_card(turn, turn.phase, view, streaming=False)
         if await self._replace(turn, card, level=logging.DEBUG):
             turn.answer, turn.answer_clipped, turn.dirty = answer, clipped, False
-            turn.controls_dirty = turn.footer_dirty = turn.header_dirty = False
+            turn.activity_dirty = turn.footer_dirty = turn.header_dirty = False
             turn.status_word = self._status(turn, turn.phase)
             turn.footer_at = time.monotonic()
             self._note_speed(turn, answer)
@@ -620,18 +634,24 @@ class FeishuStreamingCardMixin:
         self._observe_turn(turn)
         # Hermes also finalizes an interim segment before a human prompt. Only the official
         # terminal event proves the entire agent turn finished; a transport finalize does not.
-        turn.segment_finalized = (turn.observation_terminal is False
-                                  or approval_reopen.consume_approval_boundary(turn.chat_id))
+        approval_boundary = approval_reopen.consume_approval_boundary(self, key)
+        turn.segment_finalized = turn.observation_terminal is False or approval_boundary
         phase = (turn.phase if turn.segment_finalized or turn.phase in {
             PHASE_STOPPED, PHASE_FAILED, PHASE_BLOCKED, PHASE_TIMEOUT} else PHASE_DONE)
         turn.phase = phase
+        turn.finished_at = time.monotonic()
         # Finalize frames are pure text (no overlay), so no split: an answer that happens to open
         # with an emoji line must not be mistaken for tool progress — and one that was, earlier in
-        # the stream, is dropped from the timeline now.
+        # the stream, is corrected below for the legacy overlay fallback.
         final = (text or turn.answer or self._labels.tool_only).rstrip(_CURSOR_CHARS)
-        turn.timeline = [line for line in turn.timeline if line.strip() not in final]
+        # Legacy overlay parsing can mistake an emoji-led answer for one tool header.
+        # Official tool events never need this textual inference.
+        if (not turn.tools_observed and turn.tool_total == 1 and turn.timeline
+                and final.startswith(turn.timeline[0])):
+            turn.timeline.clear()
+            turn.tool_total = 0
         turn.overlay = []
-        self._note_speed(turn, final)  # a card whose text arrives only in this frame still gets a rate
+        self._note_speed(turn, final)  # sample final deltas; a lone final frame has no measured rate
         if utf8_len(final) > CARD_MAX_BYTES:
             # Cannot fit one card: show what fits and let the consumer send the full text below.
             head = render_answer(clip_markdown_head(final, CARD_MAX_BYTES - 16, "…"))
@@ -721,13 +741,14 @@ class FeishuStreamingCardMixin:
         labels = self._labels
         markdown = ((place_images(raw, items, self._render_markdown, labels) if raw else None)
                     or append_images(done.markdown, items, labels))
-        card, clipped = self._fit_card(done.turn, done.turn.phase, markdown)
-        if clipped:
-            logger.info("[Feishu] streaming card %s has no room for %d image(s)", done.turn.card_id, len(items))
-            return False
-        if not await self._replace(done.turn, card):
-            return False
-        done.turn.last_markdown = markdown  # a later tool-chain toggle must keep the images
+        async with done.turn.write_lock:
+            card, clipped = self._fit_card(done.turn, done.turn.phase, markdown, streaming=False)
+            if clipped:
+                logger.info("[Feishu] streaming card %s has no room for %d image(s)", done.turn.card_id, len(items))
+                return False
+            if not await self._replace(done.turn, card):
+                return False
+        done.turn.last_markdown = markdown
         self._completed_cards.pop(done.turn.card_id, None)
         logger.info("[Feishu] %d image(s) embedded into streaming card %s (%s)",
                     len(items), done.turn.card_id, "positioned" if raw else "appended")
@@ -741,23 +762,29 @@ class FeishuStreamingCardMixin:
             async with turn.write_lock:
                 changed = self._observe_turn(turn)
                 self._note_status(turn)
-                full = turn.header_dirty or turn.dirty or turn.controls_dirty
-                if changed or full or turn.footer_dirty:
+                full = turn.header_dirty or turn.dirty
+                if changed or full or turn.footer_dirty or turn.activity_dirty:
                     if turn.phase != PHASE_RUNNING:
                         turn.streaming_closed = True
                     if full:
                         view, _ = self._answer_view(turn, turn.answer, streaming=not turn.streaming_closed)
                         card, _ = self._fit_card(turn, turn.phase, view, streaming=not turn.streaming_closed)
                         refreshed = await self._replace(turn, card, level=logging.DEBUG)
-                        # Retain the original reason for a retry: a failed control or
+                        # Retain the original reason for a retry: a failed header or
                         # footer refresh must not force the next frame out of streaming.
                         turn.dirty = turn.dirty and not refreshed
-                        turn.controls_dirty = turn.controls_dirty and not refreshed
+                        turn.activity_dirty = turn.activity_dirty and not refreshed
                         turn.header_dirty = turn.header_dirty and not refreshed
                         turn.footer_dirty = not refreshed
+                        if refreshed:
+                            turn.footer_at = time.monotonic()
                     else:
-                        written = await self._batch_update(
-                            turn, footer_update_actions(self._footer(turn, turn.phase)))
+                        actions = (activity_update_actions(
+                            render_activity(turn.activity, phase=turn.phase, tool_count=turn.tool_count, labels=self._labels),
+                            self._footer(turn, turn.phase)) if turn.activity_dirty
+                            else footer_update_actions(self._footer(turn, turn.phase)))
+                        written = await self._batch_update(turn, actions)
+                        turn.activity_dirty = turn.activity_dirty and not written
                         turn.footer_dirty = not written
                         turn.footer_at = time.monotonic() if written else turn.footer_at
                 elif (turn.phase in ACTIVE_PHASES
@@ -773,25 +800,31 @@ class FeishuStreamingCardMixin:
                 continue
             limit = STOP_IDLE_SECONDS if turn.stop_requested_at is not None else IDLE_SEAL_SECONDS
             remaining = turn.last_frame_at + limit - time.monotonic()
-            if remaining <= 0:
-                break
-            await asyncio.sleep(min(remaining, _WATCHDOG_POLL_SECONDS))
-        if self._stream_cards.get(key) is not turn:
-            return
-        self._stream_cards.pop(key, None)
-        turn.cancel_background()
-        if turn.revivable:
-            turn.sealed_at = time.monotonic()
-            self._park_idle(key, turn)
-        phase = (PHASE_STOPPED if turn.stop_requested_at is not None else turn.phase
-                 if turn.phase in {PHASE_DONE, PHASE_STOPPED, PHASE_FAILED, PHASE_BLOCKED, PHASE_TIMEOUT} else PHASE_UNKNOWN)
-        turn.phase = phase
-        logger.info("[Feishu] streaming card %s idle for %.0fs (%s); sealing as %s", turn.card_id,
-                    time.monotonic() - turn.last_frame_at, "interrupted" if turn.stop_requested_at else "no frames", phase)
-        markdown = render_answer(turn.answer.rstrip(_CURSOR_CHARS))
-        life = turn.revivals
-        async with turn.write_lock:
-            await self._seal_final(turn, phase, markdown, markdown, abort=lambda: turn.revivals != life)
+            if remaining > 0:
+                await asyncio.sleep(min(remaining, _WATCHDOG_POLL_SECONDS))
+                continue
+            async with turn.write_lock:
+                # A text/final frame may have won while the watchdog waited for the lock.
+                if self._stream_cards.get(key) is not turn:
+                    return
+                if time.monotonic() < turn.last_frame_at + limit:
+                    continue
+                self._stream_cards.pop(key, None)
+                turn.cancel_background()
+                if turn.revivable:
+                    turn.sealed_at = time.monotonic()
+                    self._park_idle(key, turn)
+                phase = (PHASE_STOPPED if turn.stop_requested_at is not None else turn.phase
+                         if turn.phase in {PHASE_DONE, PHASE_STOPPED, PHASE_FAILED, PHASE_BLOCKED, PHASE_TIMEOUT}
+                         else PHASE_UNKNOWN)
+                turn.phase = phase
+                turn.finished_at = time.monotonic()
+                logger.info("[Feishu] streaming card %s idle for %.0fs (%s); sealing as %s", turn.card_id,
+                            time.monotonic() - turn.last_frame_at,
+                            "interrupted" if turn.stop_requested_at else "no frames", phase)
+                markdown = render_answer(turn.answer.rstrip(_CURSOR_CHARS))
+                await self._seal_final(turn, phase, markdown, markdown)
+                return
 
     def _park_idle(self, key: str, turn: StreamCardTurn) -> None:
         now = time.monotonic()
@@ -873,6 +906,9 @@ class FeishuStreamingCardMixin:
         if turn.segment_finalized and phase in {PHASE_RUNNING, PHASE_DONE}:
             phase = PHASE_SEGMENT
         answer = turn.answer.rstrip(_CURSOR_CHARS).strip()
+        if phase == PHASE_RUNNING and turn.activity_kind:
+            return {"tooling": self._labels.tooling, "thinking": self._labels.thinking,
+                    "generating": self._labels.running}.get(turn.activity_kind, self._labels.thinking)
         return status_label(phase, self._labels, has_answer=bool(answer), has_tools=turn.tool_count > 0)
 
     def _note_status(self, turn: StreamCardTurn) -> bool:
@@ -880,8 +916,7 @@ class FeishuStreamingCardMixin:
 
         The footer is an element, so a batch update carries the new word cheaply. The header is
         the card title now, which only a full card update can change: the watchdog applies it
-        within one poll, the same path that adds the Stop button mid-stream (the answer content
-        it re-sends is identical, so nothing is lost or re-typed).
+        within one poll, the answer content it re-sends is identical, preserving the streamed text.
         """
         status = self._status(turn, turn.phase)
         if status == turn.status_word:
@@ -894,11 +929,19 @@ class FeishuStreamingCardMixin:
         """Sample the estimated token count of the answer landed so far (live decode rate)."""
         tokens = estimate_tokens(text)
         now = time.monotonic()
+        if not tokens:
+            return  # a seed is not a decoded token; waiting for the first token is not decode time
         if tokens == turn.speed_tokens and turn.speed_samples:
             return
         if tokens > turn.speed_tokens and turn.speed_samples:
             gap = now - turn.speed_samples[-1][0]
-            turn.decode_seconds += min(gap, SPEED_MAX_GAP_SECONDS)  # exclude long tool gaps
+            if 0 < gap <= SPEED_MAX_GAP_SECONDS:
+                turn.decode_seconds += gap
+                turn.decode_tokens += tokens - turn.speed_tokens
+            else:
+                turn.speed_samples.clear()
+        elif tokens < turn.speed_tokens:
+            turn.speed_samples.clear()
         turn.speed_tokens = tokens
         turn.speed_samples.append((now, tokens))
 
@@ -916,77 +959,41 @@ class FeishuStreamingCardMixin:
 
     @staticmethod
     def _average_speed(turn: StreamCardTurn) -> float:
-        """Average rate over the frames that produced text, so a turn whose answer lands in one
-        or two frames still reports a number once official usage is unavailable."""
-        if not turn.speed_tokens or turn.decode_seconds < SPEED_AVERAGE_MIN_SECONDS:
+        """Estimated rate from paired text deltas only; a single final frame has no rate."""
+        if not turn.decode_tokens or turn.decode_seconds < SPEED_AVERAGE_MIN_SECONDS:
             return 0.0
-        return turn.speed_tokens / turn.decode_seconds
+        return turn.decode_tokens / turn.decode_seconds
 
     def _speed(self, turn: StreamCardTurn, phase: str) -> str:
         """The live rate while running; the official per-turn rate once the turn is over."""
         measured = turn.metrics.get("speed")
         if phase not in ACTIVE_PHASES and isinstance(measured, (int, float)):
-            return format_speed(float(measured))
-        return format_speed(self._live_speed(turn) or self._average_speed(turn))
+            value = format_speed(float(measured))
+            return ("≈ " if turn.metrics.get("speed_estimated") and value else "") + value
+        if phase in ACTIVE_PHASES:
+            if turn.activity_kind == "tooling":
+                return ""
+            value = format_speed(self._live_speed(turn))
+            if value:
+                return "≈ " + value
+            if (isinstance(measured, (int, float)) and
+                    time.monotonic() - turn.metrics.get("speed_updated_at", 0.0) <= SPEED_MAX_IDLE_SECONDS):
+                value = format_speed(measured)
+                return ("≈ " if turn.metrics.get("speed_estimated") and value else "") + value
+            return ""
+        value = format_speed(self._average_speed(turn))
+        return "≈ " + value if value else ""
 
     def _card(self, turn: StreamCardTurn, phase: str, markdown: str, *, streaming: Optional[bool] = None,
-              timeline_lines: int = TIMELINE_MAX_LINES, timeline_bytes: int = TIMELINE_MAX_BYTES,
               plain: bool = False) -> Dict[str, Any]:
-        labels = self._labels
         if turn.segment_finalized and phase in {PHASE_RUNNING, PHASE_DONE}:
             phase = PHASE_SEGMENT
-        settings = self._reading_settings()
-        settings["timeline_expanded"] = self._panel_expanded(turn.card_id)  # per card, server-owned
         return build_stream_card(
-            title=str(getattr(self, "_bot_name", "") or "").strip() or DEFAULT_CARD_TITLE, markdown=markdown,
-            timeline_md=render_timeline(turn.timeline, labels, max_lines=timeline_lines, max_bytes=timeline_bytes),
-            tool_count=turn.tool_count, footer=self._footer(turn, phase), phase=phase,
-            status=self._status(turn, phase),
-            summary=summary_for(markdown, phase, labels), labels=labels, streaming=streaming, plain=plain,
-            **settings,
+            title="", markdown=markdown, activity=turn.activity, tool_count=turn.tool_count,
+            footer=self._footer(turn, phase), phase=phase, status=self._status(turn, phase),
+            summary=summary_for(markdown, phase, self._labels), labels=self._labels,
+            streaming=streaming, plain=plain, **self._reading_settings(),
         )
-
-    def _remember_card(self, turn: StreamCardTurn) -> None:
-        """Index a card by its message id and seed its tool-chain state from the reading preset."""
-        if not turn.card_id:
-            return
-        self._card_expanded.setdefault(turn.card_id, bool(self._reading_settings()["timeline_expanded"]))
-        if turn.message_id:
-            self._turn_by_message[turn.message_id] = turn
-            self._turn_by_message.move_to_end(turn.message_id)
-        while len(self._turn_by_message) > _TURN_INDEX_MAX:
-            self._turn_by_message.popitem(last=False)
-        while len(self._card_expanded) > _TURN_INDEX_MAX:
-            self._card_expanded.popitem(last=False)
-
-    def _panel_expanded(self, card_id: str) -> bool:
-        default = bool(self._reading_settings()["timeline_expanded"])
-        return bool(self._card_expanded.get(card_id, default))
-
-    async def apply_timeline_toggle(self, message_id: str) -> bool:
-        """Flip the tool chain for the card behind ``message_id`` and repaint that card once.
-
-        The state lives here, not in the client, so the card looks the same after every later
-        update (streaming updates, seals, attachments) and a second click always collapses it.
-        """
-        turn = self._turn_by_message.get(message_id)
-        if turn is None:
-            return False
-        self._card_expanded[turn.card_id] = not self._panel_expanded(turn.card_id)
-        try:
-            async with turn.write_lock:
-                streaming = turn.phase == PHASE_RUNNING and not turn.streaming_closed
-                if streaming:
-                    view = self._answer_view(turn, turn.answer)[0]
-                else:
-                    view = turn.last_markdown or self._render_markdown(turn.answer)
-                card, _ = self._fit_card(turn, turn.phase, view, streaming=streaming)
-                if await self._replace(turn, card, level=logging.INFO):
-                    turn.footer_dirty = turn.header_dirty = False
-                    return True
-        except Exception:
-            logger.debug("Tool-chain toggle failed for card %s", turn.card_id, exc_info=True)
-        return False
 
     def _reading_settings(self) -> Dict[str, Any]:
         from .reading import resolve_reading
@@ -1018,10 +1025,6 @@ class FeishuStreamingCardMixin:
                     return False
                 turn.observation_ref = OBSERVATIONS.resolve(scope, turn.chat_id, message_id,
                                                             session_key=session_key)
-                if turn.observation_ref is not None and turn.card_id:
-                    # A safe Stop control first becomes available with this exact
-                    # official turn identity, even before usage or phase changes.
-                    turn.controls_dirty = True
             snapshot = OBSERVATIONS.snapshot(turn.observation_ref) if turn.observation_ref is not None else None
             if snapshot is not None and (snapshot.profile_scope != scope or snapshot.session_key != session_key
                                          or snapshot.message_id != message_id or snapshot.chat_id != turn.chat_id):
@@ -1038,6 +1041,18 @@ class FeishuStreamingCardMixin:
                 return False
             turn.observation_revision = snapshot.revision
             turn.observation_terminal = snapshot.terminal
+            if snapshot.activity_kind:
+                if snapshot.activity_kind == "tooling" and turn.activity_kind != "tooling":
+                    turn.speed_samples.clear()
+                turn.activity_kind = snapshot.activity_kind
+            if snapshot.tools.get("count"):
+                activity = snapshot.tools.get("label", "")
+                if activity != turn.tool_activity or snapshot.tools["count"] != turn.tool_total:
+                    turn.tool_activity = activity
+                    turn.tool_total = snapshot.tools["count"]
+                    turn.activity_dirty = True
+                turn.tools_observed = True
+                turn.timeline.clear()
             metrics = dict(snapshot.metrics)
             if metrics != turn.metrics:
                 turn.metrics, turn.footer_dirty = metrics, True
@@ -1050,20 +1065,15 @@ class FeishuStreamingCardMixin:
 
     def _fit_card(self, turn: StreamCardTurn, phase: str, markdown: str, *, streaming: Optional[bool] = None,
                   slim: bool = False) -> Tuple[Dict[str, Any], bool]:
-        """The card to send and whether its answer had to be clipped.  Measured as serialized
-        (envelope, timeline, footer, JSON escaping): over ``CARD_JSON_MAX_BYTES`` the tool timeline
-        gives way first (fewer lines, then the count only), then the answer is cut at a paragraph
-        boundary with any open fence closed.  ``slim``: one plain answer element, short timeline."""
-        budgets = ([] if slim else [(TIMELINE_MAX_LINES, TIMELINE_MAX_BYTES)]) + [(TIMELINE_SLIM_LINES, TIMELINE_SLIM_BYTES), (0, 0)]
-        for lines, nbytes in budgets:
-            card = self._card(turn, phase, markdown, streaming=streaming, timeline_lines=lines, timeline_bytes=nbytes, plain=slim)
-            size = card_json_bytes(card)
-            if size <= CARD_JSON_MAX_BYTES:
-                return card, False
+        """Fit the whole card, preserving a single bounded activity line and the answer."""
+        card = self._card(turn, phase, markdown, streaming=streaming, plain=slim)
+        size = card_json_bytes(card)
+        if size <= CARD_JSON_MAX_BYTES:
+            return card, False
         budget = utf8_len(markdown) - (size - CARD_JSON_MAX_BYTES) - 64
         for _ in range(4):
             clipped = clip_markdown_head(markdown, max(0, budget), "…")
-            card = self._card(turn, phase, clipped, streaming=streaming, timeline_lines=0, timeline_bytes=0, plain=slim)
+            card = self._card(turn, phase, clipped, streaming=streaming, plain=slim)
             over = card_json_bytes(card) - CARD_JSON_MAX_BYTES
             if over <= 0:
                 break
@@ -1083,7 +1093,7 @@ class FeishuStreamingCardMixin:
             answer = hide_open_formula(body) + answer[len(body):]
         rendered = render_answer(answer)
         skeleton = card_json_bytes(self._card(turn, PHASE_RUNNING, "", streaming=streaming))
-        budget = min(CARD_MAX_BYTES, CARD_JSON_MAX_BYTES - skeleton - _TIMELINE_GROWTH_RESERVE)
+        budget = min(CARD_MAX_BYTES, CARD_JSON_MAX_BYTES - skeleton - _ACTIVITY_GROWTH_RESERVE)
         if json_text_bytes(rendered) <= budget:
             return rendered, False
         note, raw_budget = self._labels.clipped_head, budget - (json_text_bytes(rendered) - utf8_len(rendered))

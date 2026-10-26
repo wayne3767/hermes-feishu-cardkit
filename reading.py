@@ -10,29 +10,14 @@ from typing import Any, Callable, Dict, Mapping, Optional
 
 
 PRESETS = {
-    "classic": {"timeline_expanded": False, "width_mode": "default"},
-    "task": {"timeline_expanded": False, "width_mode": "fill"},
-    "detailed": {"timeline_expanded": True, "width_mode": "fill"},
+    "classic": {"width_mode": "default"},
+    "task": {"width_mode": "fill"},
+    "detailed": {"width_mode": "fill"},
 }
 _FIELDS = {
     "reading_preset": ("card_reading_preset", "FEISHU_CARD_READING_PRESET"),
-    "timeline_expanded": ("card_timeline_expanded", "FEISHU_CARD_TIMELINE_EXPANDED"),
     "width_mode": ("card_width_mode", "FEISHU_CARD_WIDTH_MODE"),
 }
-
-
-def _boolean(value: Any) -> Optional[bool]:
-    if isinstance(value, bool):
-        return value
-    if type(value) is int and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"true", "1", "yes", "on"}:
-            return True
-        if text in {"false", "0", "no", "off"}:
-            return False
-    return None
 
 
 def resolve_reading(
@@ -66,11 +51,10 @@ def resolve_reading(
         source = f"default (invalid or unavailable {source})" if source else "default"
     values = {"reading_preset": preset, **PRESETS[preset]}
     sources = {"reading_preset": source}
-    for field in ("timeline_expanded", "width_mode"):
+    for field in ("width_mode",):
         raw, explicit_source = setting(field)
-        parsed = (_boolean(raw) if field == "timeline_expanded"
-                  else raw.strip().lower() if isinstance(raw, str) else None)
-        valid = parsed is not None if field == "timeline_expanded" else parsed in {"default", "compact", "fill"}
+        parsed = raw.strip().lower() if isinstance(raw, str) else None
+        valid = parsed in {"default", "compact", "fill"}
         if valid:
             values[field] = parsed
             sources[field] = explicit_source

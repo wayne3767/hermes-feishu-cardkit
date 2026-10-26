@@ -19,23 +19,22 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("hermes_feishu_cardkit.approval_reopen")
 
 _PATCHED_FLAG = "_hermes_cardkit_approval_reopen"
-# Chats whose next finalize is an approval boundary (not the end of the turn), so the card
-# seals as "本段已结束" even when no official observation proves it.
-_BOUNDARY_TTL_SECONDS = 60.0
-_boundaries: Dict[str, float] = {}
+# A marker belongs to this adapter and this transport turn, never a chat alone.
+_BOUNDARY_TTL_SECONDS = 300.0
 
 
-def consume_approval_boundary(chat_id: str) -> bool:
-    """True once, if an approval boundary was opened for this chat moments ago."""
+def consume_approval_boundary(adapter: Any, key: str) -> bool:
+    """Consume only the matching adapter/turn's boundary, once."""
+    boundaries = getattr(adapter, "_cardkit_approval_boundaries", {})
     now = time.monotonic()
-    for key in [k for k, seen in _boundaries.items() if now - seen > _BOUNDARY_TTL_SECONDS]:
-        _boundaries.pop(key, None)
-    return _boundaries.pop(str(chat_id or ""), None) is not None
+    for stale in [k for k, seen in boundaries.items() if now - seen > _BOUNDARY_TTL_SECONDS]:
+        boundaries.pop(stale, None)
+    return boundaries.pop(key, None) is not None
 
 
 def _is_card_adapter(adapter: Any) -> bool:
@@ -70,7 +69,11 @@ def install_approval_reopen(*, consumer_cls: Optional[type] = None) -> bool:
             # Only a boundary that will actually finalize an open stream needs the segment
             # marker; otherwise a later turn in the same chat could inherit it.
             if getattr(self, "_use_native_streaming", False) and getattr(self, "_native_stream_opened", False):
-                _boundaries[str(getattr(self, "chat_id", "") or "")] = time.monotonic()
+                adapter = self.adapter
+                boundaries = adapter.__dict__.setdefault("_cardkit_approval_boundaries", {})
+                key = f"{getattr(self, 'chat_id', '')}:{getattr(self, '_turn_id', '') or 'default'}"
+                consume_approval_boundary(adapter, key)  # prune and replace any prior matching marker
+                boundaries[key] = time.monotonic()
         return original(self, placeholder, reason=reason, reopen=reopen)
 
     setattr(close_for_approval_prompt, _PATCHED_FLAG, True)

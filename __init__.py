@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("hermes_feishu_cardkit")
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 # Registry metadata mirrored from the bundled entry (plain values; the callables are proxied lazily).
 _STATIC_ENTRY = dict(
@@ -54,6 +54,29 @@ def _bundled_env_kwargs() -> Dict[str, Any]:
         "env_enable_credentials": tuple(getattr(bundled_env, "ENV_ENABLE_CREDENTIALS", ()) or ()),
     }
 _captured: Optional[Dict[str, Any]] = None
+
+
+def _registration_metadata() -> Dict[str, Any]:
+    """Reuse upstream metadata modules without eagerly importing the SDK adapter."""
+    metadata = {**_STATIC_ENTRY, **_bundled_env_kwargs()}
+    from gateway.platform_registry import PlatformEntry
+    fields = getattr(PlatformEntry, "__dataclass_fields__", {})
+    for module_name, attribute in (("gateway_env", "AUTHZ"), ("send_targets", "SEND_ENTRY_KWARGS"),
+                                   ("dashboard_card", "DASHBOARD_CARD")):
+        try:
+            module = importlib.import_module("plugins.platforms.feishu." + module_name)
+            metadata.update({key: value for key, value in getattr(module, attribute, {}).items() if key in fields})
+        except ImportError:
+            pass  # Older supported Hermes versions do not have these declarations.
+    if "platform_hint" in fields:
+        try:
+            from plugins.platforms.feishu.adapter_hint import PLATFORM_HINT
+            metadata["platform_hint"] = PLATFORM_HINT
+            if "display_tier" in fields:
+                metadata["display_tier"] = "medium"
+        except ImportError:
+            pass
+    return metadata
 
 
 def _bundled_entry() -> Dict[str, Any]:
@@ -121,7 +144,7 @@ def register(ctx: Any) -> None:
         name="feishu", adapter_factory=build_adapter, check_fn=_deps_present,
         ensure_deps_fn=_proxy("ensure_deps_fn"), is_connected=_is_connected, validate_config=_is_connected,
         setup_fn=_proxy("setup_fn"), apply_yaml_config_fn=_proxy("apply_yaml_config_fn"),
-        standalone_sender_fn=_standalone_send, **_STATIC_ENTRY, **_bundled_env_kwargs(),
+        standalone_sender_fn=_standalone_send, **_registration_metadata(),
     )
     # Observe official lifecycle events in supported Hermes versions; the transport remains
     # the bundled adapter subclass. Unsupported hooks leave ordinary cards fully usable.

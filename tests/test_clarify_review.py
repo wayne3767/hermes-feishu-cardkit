@@ -47,7 +47,7 @@ def test_settlement_before_send_ack_refreshes_only_the_delivered_card(
             assert adapter._clarify_cards["c1"].message_id == ""
             if outcome == "timeout":
                 assert clarify.wait_for_response("c1", timeout=0.001) is None
-                assert not entry.event.is_set()  # real timeout does not resolve the Event
+                assert entry.response is None  # the resolver owns timeout signaling
             elif outcome == "typed_answer":
                 assert clarify.resolve_text_response_for_session(key, "1")
                 assert entry.response == "Continue"
@@ -72,7 +72,7 @@ def test_settlement_before_send_ack_refreshes_only_the_delivered_card(
         ]
         assert all(element["tag"] != "button" for element in elements)
         if outcome == "timeout":
-            assert not entry.event.is_set(), "a display refresh must not impersonate the resolver"
+            assert entry.response is None, "a display refresh must not fabricate an answer"
         elif outcome == "typed_answer":
             assert entry.response == "Continue"
         else:

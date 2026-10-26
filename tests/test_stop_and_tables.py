@@ -64,7 +64,7 @@ class TestStopButton:
     control left. The callback stays so buttons already sitting in chats still work."""
 
     def test_no_phase_renders_a_stop_button(self):
-        kw = dict(title="T", markdown="x", timeline_md="", tool_count=0, footer="f")
+        kw = dict(title="T", markdown="x", activity="", tool_count=0, footer="f")
         for phase in (cl.PHASE_RUNNING, cl.PHASE_DONE, cl.PHASE_STOPPED,
                       cl.PHASE_WAITING_APPROVAL, cl.PHASE_FAILED, cl.PHASE_SEGMENT):
             assert cl.STOP_BUTTON_ID not in _elements(cl.build_stream_card(phase=phase, **kw))

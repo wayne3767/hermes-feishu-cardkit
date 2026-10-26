@@ -191,7 +191,7 @@ class TestClarify:
         adapter._on_card_action_trigger(_click(
             {"hermes_cardkit": "clarify", "clarify_id": "c1", "choice": 0},
             message_id=result.message_id, open_id="ou_other"))
-        assert not entry.event.is_set()
+        assert entry.response is None
 
     def test_other_uses_original_text_capture_and_removes_buttons(self, clarify_setup):
         adapter, _, _, entry = clarify_setup
@@ -275,12 +275,12 @@ class TestClarify:
         monkeypatch.setattr(interaction, "_PROMPTS_MAX", 1)
         _send_clarify(clarify_setup)
         assert clarify.wait_for_response("c1", timeout=0.001) is None
-        assert not entry.event.is_set()
+        assert entry.response is None
         clarify.register("c2", turn.control_source.session_key, "Next?", ["Yes", "No"])
         result = _run(adapter.send_clarify(CHAT, "Next?", ["Yes", "No"], "c2",
                                           turn.control_source.session_key, {"thread_id": turn.thread_id}))
         assert result.success and set(adapter._clarify_cards) == {"c2"}
-        assert not entry.event.is_set()  # pruning must never impersonate the official resolver
+        assert entry.response is None  # pruning must never fabricate an answer
 
     def test_other_pending_text_is_not_evicted_at_capacity(self, clarify_setup, monkeypatch):
         from feishu_cardkit import interaction

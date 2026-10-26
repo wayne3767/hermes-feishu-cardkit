@@ -16,12 +16,14 @@ from types import ModuleType
 from typing import Any, Callable, NamedTuple
 
 from .turn_metrics import TurnMetrics
+from .tool_activity import ToolActivity
 
 logger = logging.getLogger("hermes_feishu_cardkit.lifecycle")
 _HOOKS = (
     "post_gateway_admission", "pre_llm_call", "pre_api_request", "post_api_request", "on_session_end",
     "pre_approval_request", "post_approval_response", "on_human_input_request",
     "on_human_input_resolved", "agent_loop_stopped",
+    "pre_tool_call", "post_tool_call",
 )
 
 
@@ -75,6 +77,8 @@ class ObservationSnapshot:
     session_key: str
     chat_id: str
     message_id: str
+    activity_kind: str = ""
+    tools: dict[str, Any] = field(default_factory=dict)
 
     @property
     def profile_scope(self) -> str:
@@ -91,6 +95,8 @@ class _Observation:
     terminal: bool = False
     revision: int = 1
     metrics: TurnMetrics = field(default_factory=TurnMetrics)
+    tools: ToolActivity = field(default_factory=ToolActivity)
+    activity_kind: str = "thinking"
     pending: dict[str, str] = field(default_factory=dict)
     touched: float = field(default_factory=time.monotonic)
 
@@ -123,7 +129,7 @@ class ObservationStore:
     @staticmethod
     def _snapshot(obs: _Observation) -> ObservationSnapshot:
         return ObservationSnapshot(obs.ref, obs.revision, obs.phase, obs.terminal, obs.metrics.snapshot(),
-                                   obs.session_key, obs.chat_id, obs.message_id)
+                                   obs.session_key, obs.chat_id, obs.message_id, obs.activity_kind, obs.tools.snapshot())
 
     def snapshot(self, ref: ObservationRef | None) -> ObservationSnapshot | None:
         with self._lock:
@@ -259,9 +265,14 @@ class ObservationStore:
                     if not obs.terminal and not obs.pending:
                         obs.phase = "running"
                 elif event == "pre_api_request":
-                    if obs.terminal or obs.pending or obs.phase == "running":
+                    if obs.terminal or obs.pending:
                         return
                     obs.phase = "running"
+                    obs.activity_kind = "thinking"
+                elif event in {"pre_tool_call", "post_tool_call"}:
+                    if obs.terminal or not obs.tools.record(event, payload):
+                        return
+                    obs.activity_kind = "tooling" if obs.tools.active else "thinking"
                 elif event == "on_session_end":
                     if payload.get("interrupted"):
                         phase = "stopped"

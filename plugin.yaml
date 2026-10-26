@@ -1,10 +1,10 @@
 name: feishu-cardkit
 label: Feishu streaming cards (CardKit)
 kind: platform
-version: 0.7.0
+version: 0.8.0
 description: >
   Native streaming cards for Hermes Agent's Feishu / Lark channel: typewriter replies in one
-  CardKit card, one collapsible tool line above the answer, status ticks, typeset formulas, figures with captions and titled
+  CardKit card, one live tool activity line above the answer, status ticks, typeset formulas, figures with captions and titled
   tables. Replaces the bundled "feishu" platform entry at runtime; patches no Hermes source.
 author: wayne3767
 license: MIT
@@ -26,18 +26,12 @@ optional_env:
   - name: FEISHU_CRON_CARD_TEMPLATE
     description: "Header colour of cron cards (Feishu card template name); failures stay red"
     default: "violet"
-  - name: FEISHU_CARD_STOP_BUTTON
-    description: "Stop button on generating cards (dispatches /stop for the clicker)"
-    default: "true"
   - name: FEISHU_CARD_LOCALE
     description: "Card wording: zh or en (default: Chinese on feishu, English on lark)"
     default: ""
   - name: FEISHU_CARD_READING_PRESET
     description: "Reading preset: classic, task, detailed; explicit display fields win"
     default: "classic"
-  - name: FEISHU_CARD_TIMELINE_EXPANDED
-    description: "Override whether the execution timeline starts expanded"
-    default: ""
   - name: FEISHU_CARD_WIDTH_MODE
     description: "Override card width: default, compact, fill"
     default: ""

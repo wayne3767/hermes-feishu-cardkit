@@ -19,7 +19,7 @@ from typing import Any
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-READING_KEYS = frozenset({"card_reading_preset", "card_timeline_expanded", "card_width_mode"})
+READING_KEYS = frozenset({"card_reading_preset", "card_width_mode"})
 PHASES = ("running", "waiting_approval", "waiting_input", "unknown", "segment", "done", "stopped", "blocked", "timeout", "failed")
 
 
@@ -34,12 +34,17 @@ def _plugin_module(name: str):
 
 
 def read_public_config(path: Path) -> dict[str, Any]:
-    """Extract the three supported reading fields; no raw config is returned or printed."""
-    import yaml  # already supplied by Hermes; only needed when --config is used
+    """Extract the two supported reading fields; no raw config is returned or printed."""
+    try:
+        from yaml import safe_load, YAMLError
+    except ImportError:
+        # Current Hermes uses ruamel; a standalone preview can also use PyYAML.
+        from ruamel.yaml import YAML, YAMLError
+        safe_load = YAML(typ="safe").load
 
     try:
-        content = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError:
+        content = safe_load(path.read_text(encoding="utf-8"))
+    except YAMLError:
         raise ValueError("YAML 解析失败；为保护配置内容，不输出原始解析错误。") from None
     if content is None:
         return {}
@@ -125,7 +130,7 @@ def write_previews(output: Path, *, config_path: Path | None = None) -> dict[str
     answer = ("## 离线示例数据（非生产数据）\n\n说明：请结合实际记录核查。\n\n"
               "| 项目 | 数量 | 处理措施 |\n|---|---:|---|\n"
               + "\n".join(f"| 示例 {i} | {i * 10} | 检查记录、确认原因并补充说明；此处用于观察较长文字的列宽与换行。 |" for i in range(1, 7)))
-    timeline = "✓ 示例资料读取完成\n✓ 示例计算完成\n等待或结束状态见卡片标题"
+    activity = "⏳ terminal · 正在计算示例数据"
     metrics = {"model": "example-model", "provider": "offline-example",
                "tokens": {"input_tokens": 1200, "output_tokens": 320},
                "context": {"used_tokens": 1800, "max_tokens": 16000}}
@@ -135,7 +140,7 @@ def write_previews(output: Path, *, config_path: Path | None = None) -> dict[str
         footer = cl.render_footer(phase=phase, tool_count=2, elapsed=42, metrics=metrics, status=status,
                                   speed=cl.format_speed(31.4))
         cards[phase] = cl.build_stream_card(
-            title="Hermes · 离线示例", markdown=answer, timeline_md=timeline,
+            title="Hermes · 离线示例", markdown=answer, activity=activity,
             tool_count=2, footer=footer, phase=phase, status=status, **resolved["values"],
         )
     scope = "file/next-load" if config_path else "defaults/preview"

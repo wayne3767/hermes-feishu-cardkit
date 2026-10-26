@@ -15,7 +15,7 @@ from feishu_cardkit.reading import resolve_reading
 def test_default_is_unchanged_and_ignores_process_environment(monkeypatch):
     monkeypatch.setenv("FEISHU_CARD_READING_PRESET", "detailed")
     result = resolve_reading({})
-    assert result["values"] == {"reading_preset": "classic", "timeline_expanded": False, "width_mode": "default"}
+    assert result["values"] == {"reading_preset": "classic", "width_mode": "default"}
     assert result["sources"]["reading_preset"] == "default"
 
 
@@ -24,16 +24,10 @@ def test_default_is_unchanged_and_ignores_process_environment(monkeypatch):
 ])
 def test_reading_presets(preset, expanded, width):
     result = resolve_reading({"card_reading_preset": preset})
-    assert result["values"] == {"reading_preset": preset, "timeline_expanded": expanded, "width_mode": width}
+    assert result["values"] == {"reading_preset": preset, "width_mode": width}
     assert result["sources"]["reading_preset"] == "config:card_reading_preset"
 
 
-@pytest.mark.parametrize("raw", [False, 0, "false", "off", "0"])
-def test_explicit_false_wins_over_expanded_preset_and_environment(raw):
-    result = resolve_reading({"card_reading_preset": "detailed", "card_timeline_expanded": raw},
-                             env_get=lambda key: "true" if key.endswith("EXPANDED") else None)
-    assert result["values"]["timeline_expanded"] is False
-    assert result["sources"]["timeline_expanded"] == "config:card_timeline_expanded"
 
 
 def test_injected_profile_environments_stay_separate():
@@ -41,8 +35,8 @@ def test_injected_profile_environments_stay_separate():
     env_b = {"FEISHU_CARD_READING_PRESET": "task", "FEISHU_CARD_TIMELINE_EXPANDED": "true"}
     a = resolve_reading({}, env_get=env_a.get)
     b = resolve_reading({}, env_get=env_b.get)
-    assert a["values"] == {"reading_preset": "detailed", "timeline_expanded": True, "width_mode": "compact"}
-    assert b["values"] == {"reading_preset": "task", "timeline_expanded": True, "width_mode": "fill"}
+    assert a["values"] == {"reading_preset": "detailed", "width_mode": "compact"}
+    assert b["values"] == {"reading_preset": "task", "width_mode": "fill"}
     assert a["sources"]["width_mode"] == "profile-environment:FEISHU_CARD_WIDTH_MODE"
     assert resolve_reading({})["values"]["reading_preset"] == "classic"
 
@@ -63,7 +57,7 @@ def test_invalid_values_fall_back_without_echoing_raw_content():
     result = resolve_reading({"card_reading_preset": "PRIVATE_INVALID_VALUE",
                               "card_width_mode": {"secret": "PRIVATE_INVALID_VALUE"},
                               "card_timeline_expanded": "PRIVATE_INVALID_VALUE"})
-    assert result["values"] == {"reading_preset": "classic", "timeline_expanded": False, "width_mode": "default"}
+    assert result["values"] == {"reading_preset": "classic", "width_mode": "default"}
     assert all("invalid" in source for source in result["sources"].values())
     assert "PRIVATE_INVALID_VALUE" not in json.dumps(result)
 
@@ -103,7 +97,7 @@ platforms:
     assert config.read_bytes() == original
     assert len(manifest["cards"]) == 10
     assert set(path.name for path in output.iterdir()) == {"index.html", "manifest.json", *manifest["cards"]}
-    assert manifest["reading"]["values"] == {"reading_preset": "detailed", "timeline_expanded": False, "width_mode": "compact"}
+    assert manifest["reading"]["values"] == {"reading_preset": "detailed", "width_mode": "compact"}
     assert all(source.startswith("file/next-load:") for source in manifest["reading"]["sources"].values())
     assert "not running gateway values" in manifest["configuration_scope"]
     generated = "\n".join(path.read_text(encoding="utf-8") for path in output.iterdir())
@@ -113,12 +107,10 @@ platforms:
     for phase in preview.PHASES:
         card = json.loads((output / f"{phase}.json").read_text(encoding="utf-8"))
         assert card["schema"] == "2.0" and card["config"]["width_mode"] == "compact"
-        summary = next(element for element in card["body"]["elements"]
-                       if element.get("element_id") == "hermes_timeline")
-        toggle = next(element for element in card["body"]["elements"]
-                      if element.get("element_id") == "hermes_timeline_toggle")
-        assert "2 次工具调用" in summary["content"] and toggle["text"]["content"] == "展开"
-        assert not any(element.get("element_id") == "hermes_timeline_md" for element in card["body"]["elements"])
+        activity = card["body"]["elements"][0]
+        assert activity["element_id"] == "hermes_activity"
+        assert "\n" not in activity["content"]
+        assert all(e["tag"] not in {"button", "collapsible_panel"} for e in card["body"]["elements"])
     assert not any(name.startswith("_cardkit_offline_preview.adapter") for name in sys.modules)
 
 

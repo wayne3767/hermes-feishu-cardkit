@@ -119,7 +119,7 @@ def test_status_labels_are_distinct_and_no_card_carries_a_stop_button():
     for phase, label in {"waiting_approval": "等待确认", "waiting_input": "等待输入",
                          "failed": "执行失败", "blocked": "已拒绝", "timeout": "已超时",
                          "unknown": "暂未收到进展"}.items():
-        card = cl.build_stream_card(title="T", markdown="body", timeline_md="tool", tool_count=1,
+        card = cl.build_stream_card(title="T", markdown="body", activity="tool", tool_count=1,
                                     footer=cl.render_footer(phase=phase, tool_count=1, elapsed=2),
                                     phase=phase)
         assert card["header"]["title"]["content"] == label
@@ -138,7 +138,7 @@ def test_metrics_only_frame_refreshes_footer_without_closing_typewriter(monkeypa
         assert cl.STOP_BUTTON_ID not in _elements(seed)
         assert seed["config"]["streaming_mode"] is True
         turn = adapter._stream_cards[f"{CHAT}:consumer"]
-        assert not turn.dirty and not turn.controls_dirty, "the seed already includes its known controls"
+        assert not turn.dirty, "the seed already includes its known controls"
         store.observe("post_api_request", profile_scope="/test/profile-a", context=context, session_id="s-1",
                       turn_id="agent-turn-1", api_request_id="req", response_model="actual",
                       usage={"prompt_tokens": 77, "output_tokens": 8})
@@ -150,53 +150,6 @@ def test_metrics_only_frame_refreshes_footer_without_closing_typewriter(monkeypa
     assert "↑77" in actions[-1]["params"]["partial_element"]["content"]
 
 
-@pytest.mark.parametrize("driver", ["frame", "watchdog"])
-@pytest.mark.parametrize("fail_first", [False, True])
-def test_late_observation_refreshes_without_closing_typewriter(monkeypatch, driver, fail_first):
-    from test_streaming_card import _fail
-    store = lifecycle.ObservationStore()
-    monkeypatch.setattr(lifecycle, "OBSERVATIONS", store)
-    monkeypatch.setattr(fs, "_WATCHDOG_POLL_SECONDS", 60)
-    adapter, fake = _adapter()
-
-    async def scenario():
-        key = f"{CHAT}:consumer"
-        await adapter.send_stream_frame("begin", chat_id=CHAT, reply_to="in-1", turn_id="consumer")
-        turn = adapter._stream_cards[key]
-        turn.watchdog.cancel()
-        await asyncio.gather(turn.watchdog, return_exceptions=True)
-        assert cl.STOP_BUTTON_ID not in _elements(fake.card_of(fake.named("create")[-1]))
-        admitted(store)  # same running phase and no metrics: only the control proof changed
-        if fail_first:
-            fake.scripts["update"] = [_fail(999)]
-
-        async def refresh(via):
-            if via == "frame":
-                await adapter.send_stream_frame("begin", chat_id=CHAT, turn_id="consumer")
-            else:
-                watcher = asyncio.create_task(adapter._seal_when_idle(key, turn))
-                await asyncio.sleep(0)  # one real watchdog pass, then its long poll sleep
-                watcher.cancel()
-                await asyncio.gather(watcher, return_exceptions=True)
-
-        await refresh(driver)
-        if fail_first:
-            assert turn.controls_dirty and not turn.dirty and not turn.streaming_closed
-            # Either path can repair the other's failed full layout write.
-            await refresh("watchdog" if driver == "frame" else "frame")
-        assert not turn.controls_dirty and not turn.dirty and not turn.streaming_closed
-        assert len(fake.named("update")) == (2 if fail_first else 1)
-        for request in fake.named("update"):
-            card = fake.card_of(request)
-            assert cl.STOP_BUTTON_ID not in _elements(card)
-            assert card["config"]["streaming_mode"] is True
-        before = len(fake.named("update"))
-        await adapter.send_stream_frame("begin continued", chat_id=CHAT, turn_id="consumer")
-        assert fake.pushes(cl.ANSWER_ELEMENT_ID)[-1] == "begin continued"
-        assert len(fake.named("update")) == before
-        assert not turn.streaming_closed and not fake.named("settings")
-
-    _run(scenario())
 
 
 def test_real_gateway_boundary_is_a_segment_and_continues_observing_timeout(monkeypatch):

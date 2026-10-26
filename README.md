@@ -2,7 +2,7 @@
 
 Native streaming cards for the Feishu / Lark channel of [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Version **0.5.0** puts the tool line first, names what the turn is doing, and trims the footer to status · duration · model.
+Version **0.8.0** uses one live activity line, accurate turn states, and a status · duration · decode speed · model footer.
 
 [English](#english) · [中文](#中文)
 
@@ -15,16 +15,15 @@ Version **0.5.0** puts the tool line first, names what the turn is doing, and tr
 Out of the box, Hermes delivers a Feishu/Lark reply as a plain message that gets edited over and over while the model writes. This plugin uses **native CardKit streaming cards**, preserving separate segments when Hermes pauses for interaction:
 
 - The card appears the moment the model starts; text renders with the platform's typewriter animation as tokens arrive.
-- The card title is the status word itself — the bot name is not repeated inside its own chat: **Thinking** before anything arrives, **Working** once a tool call is recorded but no prose has streamed, **Generating** while text flows, then **Done** (plus waiting, stopped, failed and timed-out states). While the card is quiet the footer refreshes every few seconds so the elapsed time keeps moving — a long tool call never looks frozen.
-- Every tool and skill call folds into **one line at the top of the card**, above the answer: "Thinking & tools · N tool calls". Expanding it lists the whole chain of tool and skill calls in order.
+- The card title is the status word itself — the bot name is not repeated inside its own chat: **Thinking** before anything arrives, **Working** while a tool is running, **Generating** while text flows, then **Done** (plus waiting, stopped, failed and timed-out states). While the card is quiet the footer refreshes every few seconds so the elapsed time keeps moving — a long tool call never looks frozen.
+- **One live activity line above the answer** shows the current tool or skill. Each update replaces the previous line. The finished card shows a count; detailed calls remain in Hermes session history.
 - An approval prompt closes the current card as a segment; approving or denying re-opens a **fresh card** for the rest of the turn (tool calls and answer included), instead of scattering the continuation into ordinary messages.
-- The footer reads **status · elapsed · decode speed · model**, e.g. "Generating · 45s · 31 tok/s · deepseek-v4.1-flash". The running figure is a windowed estimate from the text landed so far and disappears when no text has arrived for a while; each finished API call replaces it with the official output tokens over streaming time, and a finished card shows the per-turn measured rate. The model is known before the first token and is replaced by the model the response actually served once that event arrives; per-turn tokens and context usage are one opt-in setting.
+- The footer reads **status · elapsed · decode speed · model**, e.g. "Generating · 45s · 31 tok/s · deepseek-v4.1-flash". The running figure is a windowed estimate from the text landed so far and disappears when no text has arrived for a while; official output tokens and streaming timestamps supply the finished rate. Estimates carry ≈; missing timing is not presented as a measurement. The model is known before the first token and is replaced by the model the response actually served once that event arrives; per-turn tokens and context usage are one opt-in setting.
 - Inline LaTeX becomes Unicode math text (`\delta_p` → δₚ, `\frac{a}{b}` → (a)/(b)); display formulas are typeset into images when `matplotlib` is available.
 - Images the model attaches (`MEDIA:` lines) are placed inside the card where the model put them, with centred **"Figure N · title"** captions; markdown tables get a **"Table N · title"** heading, and tables longer than 5 rows become paged table components (10 rows per page) once the answer is done.
-- The tool line at the top of the card (**Thinking & tools · N tool calls**) carries an **Expand / Collapse** button. The chain is a real card element that only exists while expanded, and the plugin owns that state, so it can always be collapsed again — even while the answer is still streaming, where a `collapsible_panel`'s own toggle got stuck open. The card no longer renders a Stop button; send `/stop` (or use the platform's own control) instead.
 - Inline LaTeX still being typed is held back until it closes, so raw `$\frac{…` never flashes in the card.
 - Cron deliveries (scheduled job output) go out as **one static card**: the first line becomes the header (a trailing `(…)` the subtitle), the rest keeps its headings and tables, Hermes's English "Cronjob Response" wrapper is removed and the job name goes into a scheduled-task footer; the header is violet (chat cards keep blue / green / grey for their progress) and red on failures.
-- Every step degrades to Hermes's normal delivery on failure (missing CardKit scope, upload error, oversized answer, an incompatible Hermes build). Text and images are never lost.
+- CardKit, upload and size-limit failures use Hermes's normal delivery fallback. Delivery still depends on the upstream transport and network.
 
 ### How it works — no core patches
 
@@ -42,7 +41,7 @@ hermes gateway restart
 
 Repeat per profile if you run several (`hermes -p <profile> plugins install …`).
 
-Optional: display formulas are typeset as images when the `matplotlib` package is present in Hermes's own Python environment (`~/.hermes/hermes-agent/venv`). Without it the plugin works unchanged and formulas stay Unicode text.
+Optional: display formulas are typeset as images when the `matplotlib` package is present in Hermes's active Python environment. Without it the plugin works unchanged and formulas stay Unicode text.
 
 ### Configuration
 
@@ -55,11 +54,10 @@ Optional: display formulas are typeset as images when the `matplotlib` package i
 | `FEISHU_CRON_CARD_TEMPLATE` / `platforms.feishu.cron_card_template` | `violet` | Header colour of cron cards (a Feishu card template name); failures stay `red` |
 | `FEISHU_CARD_FOOTER_USAGE` / `platforms.feishu.card_footer_usage` | `false` | `true` adds provider, per-turn input/output tokens and context usage to the footer |
 | `FEISHU_CARD_READING_PRESET` / `platforms.feishu.card_reading_preset` | `classic` | `classic`, `task` or `detailed` |
-| `FEISHU_CARD_TIMELINE_EXPANDED` / `platforms.feishu.card_timeline_expanded` | preset | Explicit timeline expansion override |
 | `FEISHU_CARD_WIDTH_MODE` / `platforms.feishu.card_width_mode` | preset | `default`, `compact` or `fill` |
-| `display.platforms.feishu.tool_progress` | Hermes default `new` | `all` records every tool call in the timeline, without merging repeats |
+| `display.platforms.feishu.tool_progress` | Hermes default `new` | `all` supplies complete legacy progress events; the card retains only the latest line |
 
-Streaming as a whole is governed by Hermes's general `streaming.enabled` setting.
+Streaming as a whole is governed by Hermes's general `streaming.enabled` setting. Approval cards and decisions use the bundled Hermes workflow; set `approvals.timeout: 300` for a five-minute wait. Old timeline expansion settings are ignored.
 
 ### Letting the model produce figures and table titles
 
@@ -75,7 +73,7 @@ The card can embed figures and caption them, but whether the model draws anythin
 ### Known limits
 
 - Feishu pages markdown tables at 5 data rows; longer tables become table components (10 rows per page) in the finished card, at most 5 per card; while generating they show as markdown.
-- Stop is the ordinary `/stop` command: the card no longer carries a button, so there is no click authority to bind. Messages already in chats keep their old button and the callback stays for them.
+- Stop is the ordinary `/stop` command: the card carries no Stop button. Messages already in chats keep their old button and the callback stays for them.
 - Subscripts without a Unicode form are written run-on (`$A_d$` → Ad, `$V_{daf}$` → Vdaf), as plain-text coal and chemistry notation does.
 - Matrices, `cases`, multi-line alignment environments and formulas containing CJK text are not typeset as images; they fall back to Unicode.
 - Card JSON is capped at 30 KB; the whole card is measured, tool lines give way first, and an oversized answer shows its head in the card while the full text goes out as ordinary messages. While streaming, an oversized answer shows its newest paragraphs.
@@ -92,11 +90,13 @@ The card can embed figures and caption them, but whether the model draws anythin
 ```bash
 # needs a Hermes checkout and a Python with its dependencies; defaults to ~/.hermes/hermes-agent
 HERMES_AGENT_ROOT=/path/to/hermes-agent python -m pytest tests -q
+# Opt-in: creates an unsent card entity, without sending a chat message.
+python tools/probe_cardkit.py --env-file /path/to/profile/.env
 ```
 
 ### Acknowledgements and license
 
-The card's visual structure (status header, collapsed "Thinking & tools" panel, "Done · duration · model" footer) follows the UI of [baileyh8/hermes-feishu-streaming-card](https://github.com/baileyh8/hermes-feishu-streaming-card) (MIT). No code from that project is used; this is an independent implementation on Hermes's native streaming interface that patches nothing upstream.
+The card's visual structure (status header, tool activity above the answer, "Done · duration · model" footer) follows the UI of [baileyh8/hermes-feishu-streaming-card](https://github.com/baileyh8/hermes-feishu-streaming-card) (MIT). No code from that project is used; this is an independent implementation on Hermes's native streaming interface that patches nothing upstream.
 
 MIT licensed (see `LICENSE`). At runtime the plugin subclasses the Feishu adapter of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) (MIT, Copyright (c) 2025 Nous Research) but does not include or redistribute its code.
 
@@ -105,17 +105,16 @@ MIT licensed (see `LICENSE`). At runtime the plugin subclasses the Feishu adapte
 Hermes 的飞书通道默认把回复作为普通消息反复编辑。这个插件使用**原生飞书 CardKit 流式卡片**，遇到审批或澄清时按 Hermes 的实际流程保留前后片段：
 
 - 模型开始生成时卡片立刻出现，文字以打字机效果逐步渲染
-- 状态词跟着回合走：还没有任何输出时是“思考中”，已记录工具调用但还没有正文时是“调用工具中”，文字流动时是“生成中”，结束时是“已完成”（另有等待确认、等待输入、已停止、执行失败、已超时等状态）。卡片静默时页脚每几秒刷新一次时长，长时间的单个工具调用也不会显得卡死
-- 每一次工具和技能调用都收进**正文最前、标题栏下的那一行**“思考与工具 · N 次工具调用”，点开即可看到完整的工具与技能调用链
+- 状态词跟着回合走：还没有任何输出时是“思考中”，工具执行时是“调用工具中”，文字流动时是“生成中”，结束时是“已完成”（另有等待确认、等待输入、已停止、执行失败、已超时等状态）。卡片静默时页脚每几秒刷新一次时长，长时间的单个工具调用也不会显得卡死
+- **标题栏下只显示一条实时动态**：当前工具或技能的新动态替换上一条，不保留展开/收起功能。结束后显示本轮调用次数；详细记录仍可在 Hermes 会话历史中查询
 - 审批提示会把当前卡片封为“本段已结束”；批准或拒绝后，剩余回合会**新开一张卡片**继续写（工具链和正文都在卡里），不再散落到普通消息
-- 页脚为**状态 · 时长 · 解码速度 · 模型**，例如“⏳ 生成中 · 45s · 31 tok/s · deepseek-v4.1-flash”：运行中的速度是已落地文本的窗口估计，长时间没有新文本就不显示；每次 API 调用结束后改用官方输出 token 除以流式时长（首个分片到结束），完成后的卡片显示本轮实测速率。模型在首个 token 前即可显示，收到官方事件后换成实际服务的模型；本轮 token 与上下文占用改为可选配置
-- 标题栏只显示状态（思考中 / 调用工具中 / 生成中 / 已完成等），不再重复 bot 名称��
+- 页脚为**状态 · 时长 · 解码速度 · 模型**，例如“⏳ 生成中 · 45s · 31 tok/s · deepseek-v4.1-flash”：运行中的速度是已落地文本的窗口估计，长时间没有新文本就不显示；有官方时间戳时，以输出 token 除以流式时长（首个分片到结束）；估计值带“≈”，缺少有效计时则隐藏。模型在首个 token 前即可显示，收到官方事件后换成实际服务的模型；本轮 token 与上下文占用改为可选配置
+- 标题栏只显示状态（思考中 / 调用工具中 / 生成中 / 已完成等），不再重复 bot 名称
 - 行内 LaTeX 公式转成 Unicode 数学文本；块级公式在装了 matplotlib 时排版成图片
 - 模型附带的图片（`MEDIA:` 行）嵌进卡片正文对应位置，带居中的"图N 标题"图注；表格上方加"表N 标题"表题；超过 5 行的表格在完成后改为分页表格组件（每页 10 行）
-- 正文最前那一行「思考与工具 · N 次工具调用」带一个**展开 / 收起**按钮：调用链只在展开时作为真实元素存在，状态由插件保存，所以一定收得回来（流式更新时原生折叠面板的展开状态会卡住）。卡片不再渲染"停止生成"按钮，需要时发 `/stop`
 - 生成中尚未闭合的行内公式先不显示，不会闪出原始 LaTeX
 - 定时任务（cron）的输出以**一张静态卡片**发出：首行作标题（末尾括号内容作副标题），其余保留标题层级和表格，Hermes 默认加的英文外壳（"Cronjob Response…"）会去掉，任务名放进"定时任务"页脚；标题栏为紫色（聊天卡片的蓝 / 绿 / 灰表示进度，两者分开），标题含"失败"等字样时为红色
-- 任一环节失败都退回 Hermes 原有的投递方式，文字和图片不会丢
+- CardKit、上传和体积限制等失败走 Hermes 原有投递回退；最终送达仍取决于上游传输和网络
 
 **不修改 Hermes 的任何源码文件。** 插件在运行时用 Hermes 平台注册表的"后注册者优先"规则接管 `feishu` 平台条目，适配器是内置飞书适配器的子类。`hermes update` 不会撤销安装；上游改内部实现时，插件只依赖适配器的流式接口和少数几个稳定接缝，接缝缺失时自动退回内置适配器。
 
@@ -131,7 +130,7 @@ hermes gateway restart
 
 多 profile 用户对每个需要的 profile 分别执行（`hermes -p <profile> plugins install …`）。
 
-可选：块级公式排版成图片需要 `matplotlib` 这个包存在于 Hermes 自己的 Python 环境（`~/.hermes/hermes-agent/venv`）里。没有它插件照常工作，只是公式以 Unicode 文本显示。
+可选：块级公式排版成图片需要 `matplotlib` 这个包存在于 Hermes 当前实际使用的 Python 环境里。没有它插件照常工作，只是公式以 Unicode 文本显示。
 
 ### 配置
 
@@ -143,12 +142,11 @@ hermes gateway restart
 | `FEISHU_CRON_CARD` / `platforms.feishu.cron_card` | `true` | 设为 `false` 时定时任务输出恢复为普通消息 |
 | `FEISHU_CRON_CARD_TEMPLATE` / `platforms.feishu.cron_card_template` | `violet` | 定时任务卡片标题栏颜色（飞书卡片模板名）；失败始终为 `red` |
 | `FEISHU_CARD_FOOTER_USAGE` / `platforms.feishu.card_footer_usage` | `false` | 设为 `true` 时页脚额外显示供应方、本轮输入/输出 token 与上下文占用 |
-| `FEISHU_CARD_READING_PRESET` / `platforms.feishu.card_reading_preset` | `classic` | `classic` 默认布局、`task` 任务布局、`detailed` 展开过程 |
-| `FEISHU_CARD_TIMELINE_EXPANDED` / `platforms.feishu.card_timeline_expanded` | 随预设 | 显式指定过程面板是否展开 |
+| `FEISHU_CARD_READING_PRESET` / `platforms.feishu.card_reading_preset` | `classic` | `classic` 默认宽度，`task` / `detailed` 填充宽度（保留旧配置名） |
 | `FEISHU_CARD_WIDTH_MODE` / `platforms.feishu.card_width_mode` | 随预设 | `default`、`compact`、`fill` |
-| `display.platforms.feishu.tool_progress` | Hermes 默认 `new` | 设为 `all` 时时间线记录每一次工具调用，连续同名调用不合并 |
+| `display.platforms.feishu.tool_progress` | Hermes 默认 `new` | 设为 `all` 时提供完整的兼容进度事件；卡片只保留最新动态 |
 
-流式本身受 Hermes 通用设置 `streaming.enabled` 控制。
+流式本身受 Hermes 通用设置 `streaming.enabled` 控制。审批卡片和处理沿用 Hermes 原生流程；`approvals.timeout: 300` 表示等待五分钟。卡片不提供停止按钮，需要时发送 `/stop`。
 
 ### 让模型配图和写表题
 
@@ -168,7 +166,7 @@ hermes gateway restart
 - 停止一律走 `/stop`：卡片不再提供按钮，因此没有可绑定的点击权限；聊天里遗留的旧卡片按钮仍沿用原回调，不影响新卡片。
 - 没有 Unicode 下标字形的下标按连写处理（`$A_d$` → Ad，`$V_{daf}$` → Vdaf），与煤质、化学的纯文本写法一致。
 - 矩阵、分段函数、多行对齐环境和含中文的公式不做图片排版，退回 Unicode 文本。
-- 卡片 JSON 上限 30 KB；按整张卡片计量，先压缩工具时间线；仍超长的回答在卡片里显示开头部分，完整内容由 Hermes 按普通消息发出。生成过程中超长时显示最新几段。
+- 卡片 JSON 上限 30 KB；按整张卡片计量；仍超长的回答在卡片里显示开头部分，完整内容由 Hermes 按普通消息发出。生成过程中超长时显示最新几段。
 - CardKit 流式模式 10 分钟后自动关闭；更长的回合继续用整卡更新刷新同一张卡片（没有打字机效果）。
 - `/stop`、`/new` 只更新精确匹配会话的卡片。5 分钟无文本显示"暂未收到进展"；已观测到的人工等待保持等待状态。审批/澄清前的流式结束仅表示"本段已结束"，不会冒充整个任务完成。
 - 模型和用量通过官方事件按原始消息、profile、会话和回合关联。缺少事件、归属有歧义或部分排队路径缺少准入事件时，隐藏用量统计；模型名优先取官方事件，取不到时用 `pre_llm_call` 的声明值（不是配置默认值）。运行中的解码速度是按已落地文本做的窗口估计（中文约 1 token、其他字符约 4 字符 1 token），结束后改用官方输出 token 除以流式时长。输入总量使用包含缓存的 canonical prompt tokens；上下文占用取最近请求，不是本轮累计消耗。不显示模型原始思考。
@@ -179,13 +177,13 @@ hermes gateway restart
 
 ### 开发与测试
 
-`0.5.0` 默认仍为 `classic` 折叠布局；`task` 默认折叠并使用 `fill` 宽度，`detailed` 默认展开。显式字段覆盖预设，YAML 优先于当前 profile 的环境设置。适配器创建时保存读取结果；运行中的 `adapter.describe_card_config()` 只返回已加载的三个展示字段及来源，不输出凭据。profile 读取器失效时使用安全默认值，不回退到另一 profile 的进程级环境。
+`0.8.0` 默认 `classic` 使用普通宽度，`task` / `detailed` 使用 `fill` 宽度。旧 `card_timeline_expanded` 配置不再读取。显式字段覆盖预设，YAML 优先于当前 profile 的环境设置。适配器创建时保存读取结果；运行中的 `adapter.describe_card_config()` 只返回已加载的两个展示字段及来源，不输出凭据。profile 读取器失效时使用安全默认值，不回退到另一 profile 的进程级环境。
 
 离线预览不加载插件、网关或 SDK，也不连接飞书：
 
 ```bash
 python3 -B tools/preview_cards.py --output /tmp/cardkit-preview
-# 可选：仅读取指定配置文件的三个展示字段（需要已有 PyYAML）
+# 可选：仅读取指定配置文件的两个展示字段（需要 PyYAML 或 ruamel.yaml）
 python3 -B tools/preview_cards.py --config /path/to/config.yaml --output /tmp/cardkit-preview
 ```
 
@@ -194,10 +192,12 @@ python3 -B tools/preview_cards.py --config /path/to/config.yaml --output /tmp/ca
 ```bash
 # 需要一个 Hermes 检出和带其依赖的 Python；默认用 ~/.hermes/hermes-agent
 HERMES_AGENT_ROOT=/path/to/hermes-agent python -m pytest tests -q
+# Opt-in: creates an unsent card entity, without sending a chat message.
+python tools/probe_cardkit.py --env-file /path/to/profile/.env
 ```
 
 ### 致谢与许可
 
-卡片的视觉结构（标题状态栏、"思考与工具"折叠面板、"已完成 · 时长 · 模型"页脚）借鉴了 [baileyh8/hermes-feishu-streaming-card](https://github.com/baileyh8/hermes-feishu-streaming-card)（MIT）的界面设计，特此致谢。本项目未使用该项目的代码，而是基于 Hermes 上游的原生流式接口独立实现，不修改上游源码。
+卡片的视觉结构（标题状态栏、正文上方的工具动态、"已完成 · 时长 · 模型"页脚）借鉴了 [baileyh8/hermes-feishu-streaming-card](https://github.com/baileyh8/hermes-feishu-streaming-card)（MIT）的界面设计，特此致谢。本项目未使用该项目的代码，而是基于 Hermes 上游的原生流式接口独立实现，不修改上游源码。
 
 本项目以 MIT 许可发布（见 `LICENSE`）。它在运行时继承 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)（MIT，Copyright (c) 2025 Nous Research）的飞书适配器，但不包含或分发其代码。

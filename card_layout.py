@@ -4,8 +4,7 @@ Nothing here touches the network or adapter state; ``streaming.py`` owns the tur
 calls into these functions with plain data.  Layout of a completed card:
 
     header      title = 思考中 / 调用工具中 / 生成中 / 已完成 / 已停止 (the bot name is not shown)
-    timeline    collapsible panel "思考与工具 · N 次工具调用" — FIRST in the body, one line while
-                collapsed; expanding it shows every recorded tool (and skill) call
+    activity    one live tool/skill line above the answer; new activity replaces the old one
     answer      prose markdown; each figure (image + ``图N　标题`` caption) is its own centred
                 element; each table gets a centred ``表N　标题`` element above it
     hr
@@ -35,22 +34,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .math_text import convert_math
 
 ANSWER_ELEMENT_ID = "hermes_answer"
-TIMELINE_PANEL_ID = "hermes_timeline"
-TIMELINE_ELEMENT_ID = "hermes_timeline_md"
+ACTIVITY_ELEMENT_ID = "hermes_activity"
 FOOTER_ELEMENT_ID = "hermes_footer"
+# Only used by already-delivered legacy cards. New cards have no Stop control.
 STOP_BUTTON_ID = "hermes_stop"
-# Card-action value of the stop button; the adapter turns a click into "/stop" for the clicker.
-# Cards no longer render the button (0.7.0); the callback stays for buttons already in chats.
 STOP_ACTION = {"hermes_cardkit": "stop"}
-# One-line tool summary plus its expand/collapse button. The chain is a separate element that
-# exists only while expanded: a collapsible_panel's own toggle cannot be driven from the server,
-# and in a streaming card the client's toggle could not be collapsed again, so the state lives in
-# the plugin and every update renders it (a full card update on a click).
-TIMELINE_SUMMARY_ID = "hermes_timeline"
-TIMELINE_TOGGLE_ID = "hermes_timeline_toggle"
-TIMELINE_ACTION = {"hermes_cardkit": "timeline"}
-# Previous name of the summary element; kept so existing helpers/tests keep a stable id.
-TIMELINE_PANEL_ID = TIMELINE_SUMMARY_ID
 # Markdown tables show 5 data rows per page (fixed); longer ones become table components (up to
 # 10 rows per page) in the completed layout.  Feishu allows 5 table components per card.
 MARKDOWN_TABLE_ROWS = 5
@@ -62,15 +50,10 @@ MAX_TABLE_CELL_CHARS = 1200
 DEFAULT_CARD_TITLE = "Hermes Agent"
 SEED_PLACEHOLDER = "…"
 # Feishu rejects card JSON above 30 KB.  CARD_JSON_MAX_BYTES caps the serialized card actually
-# sent (envelope, timeline, footer and JSON escaping included); CARD_MAX_BYTES caps the raw answer.
+# sent (envelope, activity, footer and JSON escaping included); CARD_MAX_BYTES caps the raw answer.
 CARD_JSON_MAX_BYTES = 28000
 CARD_MAX_BYTES = 24000
-TIMELINE_MAX_LINES = 40
-TIMELINE_MAX_BYTES = 6000
-# Timeline budget when the whole card is over CARD_JSON_MAX_BYTES (the timeline gives way first).
-TIMELINE_SLIM_LINES = 8
-TIMELINE_SLIM_BYTES = 1500
-ACTIVITY_MAX_CHARS = 60
+ACTIVITY_MAX_CHARS = 100
 
 PHASE_RUNNING, PHASE_DONE, PHASE_STOPPED = "running", "done", "stopped"
 PHASE_WAITING_APPROVAL, PHASE_WAITING_INPUT = "waiting_approval", "waiting_input"
@@ -92,8 +75,7 @@ class Labels:
     thinking: str  # running, no answer text and no tool calls yet
     tooling: str  # running, tool calls recorded but no answer text yet
     generating: str  # notification preview while streaming
-    timeline_empty: str
-    omitted: str  # "{n}" lines dropped from the timeline
+    activity_empty: str
     tools: str  # "{n}" tool calls
     figure: str  # "{n}" then a separator then the title
     table: str
@@ -104,23 +86,18 @@ class Labels:
     stop_button: str  # legacy: cards no longer render it, the callback stays
     stop_toast: str  # toast after a legacy stop button is clicked
     stop_failed: str  # toast when a legacy stop click cannot be turned into /stop
-    timeline_expand: str  # button that shows the tool chain
-    timeline_collapse: str  # button that hides it again
-    toggle_failed: str  # toast when the toggle cannot be applied
 
 
 ZH = Labels(running="生成中", done="已完成", stopped="已停止", thinking="思考中", tooling="调用工具中",
-            generating="生成中…", timeline_empty="尚无工具调用",
-            omitted="… 已省略 {n} 行", tools="{n} 次工具调用", figure="图{n}", table="表{n}", picture="图片", tool_only="✅",
+            generating="生成中…", activity_empty="尚无工具调用",
+            tools="{n} 次工具调用", figure="图{n}", table="表{n}", picture="图片", tool_only="✅",
             clipped_head="…（前文较长已省略，完整内容在生成结束后给出）", scheduled="定时任务",
-            stop_button="停止生成", stop_toast="已请求停止", stop_failed="未能停止，请发送 /stop",
-            timeline_expand="展开", timeline_collapse="收起", toggle_failed="暂时无法切换，请稍后重试")
+            stop_button="停止生成", stop_toast="已请求停止", stop_failed="未能停止，请发送 /stop")
 EN = Labels(running="Generating", done="Done", stopped="Stopped", thinking="Thinking", tooling="Working",
-            generating="Generating…", timeline_empty="No tool calls yet",
-            omitted="… {n} earlier lines omitted", tools="{n} tool calls", figure="Figure {n}", table="Table {n}", picture="Image",
+            generating="Generating…", activity_empty="No tool calls yet",
+            tools="{n} tool calls", figure="Figure {n}", table="Table {n}", picture="Image",
             tool_only="✅", clipped_head="… (earlier text omitted; the full answer follows when done)", scheduled="Scheduled task",
-            stop_button="Stop", stop_toast="Stopping…", stop_failed="Could not stop; send /stop",
-            timeline_expand="Expand", timeline_collapse="Collapse", toggle_failed="Could not toggle; try again")
+            stop_button="Stop", stop_toast="Stopping…", stop_failed="Could not stop; send /stop")
 _LABELS = {"zh": ZH, "en": EN}
 
 
@@ -298,23 +275,20 @@ def summary_for(markdown: str, phase: str, labels: Labels = ZH) -> str:
 
 # --- Timeline / footer ----------------------------------------------------------------------------
 
-def render_timeline(lines: List[str], labels: Labels = ZH, *, max_lines: int = TIMELINE_MAX_LINES,
-                    max_bytes: int = TIMELINE_MAX_BYTES) -> str:
-    """Timeline markdown: newest ``max_lines`` lines within ``max_bytes`` (0 lines: the count only)."""
-    if not lines:
-        return labels.timeline_empty
-    kept = list(lines[-max_lines:]) if max_lines > 0 else []
-    while len(kept) > 1 and utf8_len("\n".join(kept)) > max_bytes:
-        kept.pop(0)
-    if len(kept) < len(lines):
-        kept.insert(0, labels.omitted.format(n=len(lines) - len(kept)))
-    return "\n".join(kept)
-
-
-def timeline_title(tool_count: int, labels: Labels = ZH, reading_preset: str = "classic") -> str:
-    prefix = ("执行过程" if labels is ZH else "Execution") if reading_preset == "task" else (
-        "思考与工具" if labels is ZH else "Thinking & tools")
-    return f"{prefix} · {labels.tools.format(n=tool_count)}"
+def render_activity(latest: str, *, phase: str, tool_count: int, labels: Labels = ZH) -> str:
+    """One bounded live line. Finished cards keep a count, never a tool history."""
+    if phase not in ACTIVE_PHASES:
+        if not tool_count:
+            return labels.activity_empty
+        title = "工具调用已结束" if labels is ZH else "Tool calls finished"
+        return f"{title} · {labels.tools.format(n=tool_count)}"
+    if not latest:
+        return labels.activity_empty
+    # Do not let a tool label add card markup, lines or an @mention.
+    latest = " ".join(str(latest).split())
+    latest = latest.replace("<", "‹").replace(">", "›").replace("[", "［").replace("]", "］")
+    latest = latest.replace("`", "ˋ").replace("*", "＊").replace("_", "\\_")
+    return latest if len(latest) <= ACTIVITY_MAX_CHARS else latest[:ACTIVITY_MAX_CHARS - 1] + "…"
 
 
 def render_footer(*, phase: str, tool_count: int, elapsed: float, model: str = "", activity: str = "",
@@ -616,22 +590,15 @@ def layout_answer_elements(markdown: str, labels: Labels = ZH, *, number_tables:
 
 
 def build_stream_card(
-    *, title: str, markdown: str, timeline_md: str, tool_count: int, footer: str, phase: str, summary: str = "",
+    *, title: str, markdown: str, activity: str, tool_count: int, footer: str, phase: str, summary: str = "",
     labels: Labels = ZH, streaming: Optional[bool] = None, plain: bool = False,
-    timeline_expanded: bool = False, toggle_value: Optional[Dict[str, Any]] = None,
     reading_preset: str = "classic", width_mode: str = "default", status: str = "",
 ) -> Dict[str, Any]:
-    """Card JSON 2.0 for one turn.  ``markdown`` is the answer exactly as it should show (math and
-    images already rendered); streaming mode is on only while ``phase`` is running (``streaming=False``
-    keeps it off: a running card past CardKit's streaming window).  ``plain`` keeps a finished
-    answer in one element instead of the figure / table layout (the slim fallback card).
+    """One live activity line above the answer; status, elapsed, speed and model below.
 
-    Tool calls are one line at the top of the body — "思考与工具 · N 次工具调用" plus an
-    expand/collapse button — and the chain itself is a separate element that exists only while
-    ``timeline_expanded`` is true.  The plugin owns that flag (a card action flips it), because a
-    collapsible_panel's own toggle is client-only and could not be collapsed again inside a
-    streaming card.  ``status`` overrides the phase word; the header renders it alone (the bot
-    name is redundant inside its own chat, so ``title`` is accepted but not shown)."""
+    There are no tool-history callbacks or expanding containers. The stable activity
+    and answer element IDs support cheap updates during streaming.
+    """
     subtitle = status or phase_label(phase, labels)
     template = _PHASE_TEMPLATE.get(phase, "grey")
     running = phase in ACTIVE_PHASES
@@ -641,16 +608,8 @@ def build_stream_card(
               else layout_answer_elements(body, labels))
     elements: List[Dict[str, Any]] = []
     if running or tool_count:
-        elements.append({"tag": "markdown", "element_id": TIMELINE_SUMMARY_ID, "text_size": "notation",
-                         "content": timeline_title(tool_count, labels, reading_preset)})
-        elements.append({
-            "tag": "button", "element_id": TIMELINE_TOGGLE_ID, "type": "default", "size": "small",
-            "text": {"tag": "plain_text",
-                     "content": labels.timeline_collapse if timeline_expanded else labels.timeline_expand},
-            "behaviors": [{"type": "callback", "value": dict(toggle_value or TIMELINE_ACTION)}],
-        })
-        if timeline_expanded:
-            elements.append({"tag": "markdown", "element_id": TIMELINE_ELEMENT_ID, "content": timeline_md})
+        elements.append({"tag": "markdown", "element_id": ACTIVITY_ELEMENT_ID, "text_size": "notation",
+                         "content": render_activity(activity, phase=phase, tool_count=tool_count, labels=labels)})
     elements.extend(answer)
     elements.append({"tag": "hr"})
     elements.append({"tag": "markdown", "element_id": FOOTER_ELEMENT_ID, "text_size": "notation", "content": footer})
@@ -669,18 +628,11 @@ def build_stream_card(
     }
 
 
-def timeline_update_actions(tool_count: int, timeline_md: str, footer: str, labels: Labels = ZH,
-                            reading_preset: str = "classic", expanded: bool = False) -> List[Dict[str, Any]]:
-    """CardKit batch actions refreshing the tool summary, the chain (when it is on screen) and the
-    footer in one call — the answer element keeps streaming untouched."""
-    def _partial(element_id: str, partial: Dict[str, Any]) -> Dict[str, Any]:
-        return {"action": "partial_update_element", "params": {"element_id": element_id, "partial_element": partial}}
-    actions = [_partial(TIMELINE_SUMMARY_ID,
-                        {"content": timeline_title(tool_count, labels, reading_preset)})]
-    if expanded:
-        actions.append(_partial(TIMELINE_ELEMENT_ID, {"content": timeline_md}))
-    actions.append(_partial(FOOTER_ELEMENT_ID, {"content": footer}))
-    return actions
+def activity_update_actions(activity: str, footer: str) -> List[Dict[str, Any]]:
+    """Refresh the current activity and footer without repainting the answer."""
+    return [{"action": "partial_update_element", "params": {
+        "element_id": element_id, "partial_element": {"content": content}}}
+        for element_id, content in ((ACTIVITY_ELEMENT_ID, activity), (FOOTER_ELEMENT_ID, footer))]
 
 
 def footer_update_actions(footer: str) -> List[Dict[str, Any]]:
@@ -689,13 +641,11 @@ def footer_update_actions(footer: str) -> List[Dict[str, Any]]:
 
 
 __all__ = [
-    "ANSWER_ELEMENT_ID", "TIMELINE_PANEL_ID", "TIMELINE_ELEMENT_ID", "FOOTER_ELEMENT_ID", "DEFAULT_CARD_TITLE",
-    "SEED_PLACEHOLDER", "CARD_JSON_MAX_BYTES", "CARD_MAX_BYTES", "TIMELINE_MAX_LINES", "TIMELINE_MAX_BYTES",
-    "TIMELINE_SLIM_LINES", "TIMELINE_SLIM_BYTES",
+    "ANSWER_ELEMENT_ID", "ACTIVITY_ELEMENT_ID", "FOOTER_ELEMENT_ID", "DEFAULT_CARD_TITLE",
+    "SEED_PLACEHOLDER", "CARD_JSON_MAX_BYTES", "CARD_MAX_BYTES",
     "ACTIVITY_MAX_CHARS", "PHASE_RUNNING", "PHASE_DONE", "PHASE_STOPPED", "ImageItem", "Labels", "ZH", "EN", "labels_for",
     "utf8_len", "truncate_utf8", "json_text_bytes", "card_json_bytes", "clip_markdown_head", "clip_markdown_tail",
-    "format_duration", "format_speed", "estimate_tokens", "render_answer", "summary_for", "render_timeline", "status_label",
-    "timeline_title", "render_footer", "title_from_filename", "image_block", "append_images", "place_images",
+    "format_duration", "format_speed", "estimate_tokens", "render_answer", "summary_for", "render_activity", "status_label", "render_footer", "title_from_filename", "image_block", "append_images", "place_images",
     "layout_answer_elements", "table_component", "build_stream_card", "STOP_BUTTON_ID", "STOP_ACTION",
-    "MARKDOWN_TABLE_ROWS", "TABLE_PAGE_SIZE", "MAX_TABLE_COMPONENTS", "timeline_update_actions", "footer_update_actions",
+    "MARKDOWN_TABLE_ROWS", "TABLE_PAGE_SIZE", "MAX_TABLE_COMPONENTS", "activity_update_actions", "footer_update_actions",
 ]

@@ -1,8 +1,24 @@
 # Changelog
 
+## 0.8.0 — 2026-10-27
+
+- Replace expandable tool history with one live activity line. New tool or skill activity
+  replaces the prior line; completed cards show a count. Detailed records stay in Hermes history.
+- Fix rejected card creation: the old toggle element ID exceeded Feishu's 20-character limit
+  (API error 300301). Add schema regression checks and an opt-in unsent CardKit wire probe.
+- Follow official pre/post tool hooks for running status, including concurrent calls. Keep
+  arguments and results out of activity state; use legacy progress parsing when hooks are absent.
+- Parse epoch timestamps correctly, pair output tokens with their own durations, mark estimated
+  decode rates with ≈, and hide stale live rates. Freeze completed segment elapsed time.
+- Serialize card updates, coalesce concurrent seed requests, and wait for an opening card before
+  finalization. Scope approval boundaries to the adapter and transport turn.
+- Mirror current bundled platform metadata, including authorization and send-target declarations.
+  Native approvals and `/stop` remain owned by Hermes. Remove obsolete expansion configuration.
+
+
 ## 0.7.0 — 2026-10-27
 
-- **The tool chain can always be collapsed again.** The `collapsible_panel` is gone: inside a
+- **Historical change, superseded by 0.8.0; live API validation later found its element ID invalid.** The `collapsible_panel` is gone: inside a
   streaming card its toggle could open but not close, and no server update could drive it. The
   card now shows one summary line ("思考与工具 · N 次工具调用") with an **展开 / 收起** button; the
   chain is a separate element that exists only while expanded and the plugin stores that state per
