@@ -15,7 +15,7 @@ Version **0.5.0** puts the tool line first, names what the turn is doing, and tr
 Out of the box, Hermes delivers a Feishu/Lark reply as a plain message that gets edited over and over while the model writes. This plugin uses **native CardKit streaming cards**, preserving separate segments when Hermes pauses for interaction:
 
 - The card appears the moment the model starts; text renders with the platform's typewriter animation as tokens arrive.
-- The status word follows the turn: **Thinking** before anything arrives, **Working** once a tool call is recorded but no prose has streamed, **Generating** while text flows, then **Done** (plus waiting, stopped, failed and timed-out states). While the card is quiet the footer refreshes every few seconds so the elapsed time keeps moving — a long tool call never looks frozen.
+- The card title is the status word itself — the bot name is not repeated inside its own chat: **Thinking** before anything arrives, **Working** once a tool call is recorded but no prose has streamed, **Generating** while text flows, then **Done** (plus waiting, stopped, failed and timed-out states). While the card is quiet the footer refreshes every few seconds so the elapsed time keeps moving — a long tool call never looks frozen.
 - Every tool and skill call folds into **one line at the top of the card**, above the answer: "Thinking & tools · N tool calls". Expanding it lists the whole chain of tool and skill calls in order.
 - The footer reads **status · elapsed · decode speed · model**, e.g. "Generating · 45s · 31 tok/s · deepseek-v4.1-flash". The running figure is a windowed estimate from the text landed so far and disappears when no text has arrived for a while; each finished API call replaces it with the official output tokens over streaming time, and a finished card shows the per-turn measured rate. The model is known before the first token and is replaced by the model the response actually served once that event arrives; per-turn tokens and context usage are one opt-in setting.
 - Inline LaTeX becomes Unicode math text (`\delta_p` → δₚ, `\frac{a}{b}` → (a)/(b)); display formulas are typeset into images when `matplotlib` is available.
@@ -108,7 +108,7 @@ Hermes 的飞书通道默认把回复作为普通消息反复编辑。这个插�
 - 状态词跟着回合走：还没有任何输出时是“思考中”，已记录工具调用但还没有正文时是“调用工具中”，文字流动时是“生成中”，结束时是“已完成”（另有等待确认、等待输入、已停止、执行失败、已超时等状态）。卡片静默时页脚每几秒刷新一次时长，长时间的单个工具调用也不会显得卡死
 - 每一次工具和技能调用都收进**正文最前、标题栏下的那一行**“思考与工具 · N 次工具调用”，点开即可看到完整的工具与技能调用链
 - 页脚为**状态 · 时长 · 解码速度 · 模型**，例如“⏳ 生成中 · 45s · 31 tok/s · deepseek-v4.1-flash”：运行中的速度是已落地文本的窗口估计，长时间没有新文本就不显示；每次 API 调用结束后改用官方输出 token 除以流式时长（首个分片到结束），完成后的卡片显示本轮实测速率。模型在首个 token 前即可显示，收到官方事件后换成实际服务的模型；本轮 token 与上下文占用改为可选配置
-- 标题栏区分生成、等待、停止、失败和未知状态
+- 标题栏只显示状态（思考中 / 调用工具中 / 生成中 / 已完成等），不再重复 bot 名称��
 - 行内 LaTeX 公式转成 Unicode 数学文本；块级公式在装了 matplotlib 时排版成图片
 - 模型附带的图片（`MEDIA:` 行）嵌进卡片正文对应位置，带居中的"图N 标题"图注；表格上方加"表N 标题"表题；超过 5 行的表格在完成后改为分页表格组件（每页 10 行）
 - "停止生成"按钮绑定原发起者、会话和话题；来源不明、越权或过期的点击不能控制其他回合

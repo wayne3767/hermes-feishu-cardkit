@@ -268,7 +268,8 @@ class TestTurnLifecycle:
         assert create.request_body.type == "card_json"
         card = fake.card_of(create)
         assert card["schema"] == "2.0" and card["config"]["streaming_mode"] is True
-        assert card["header"]["title"]["content"] == "小助手" and card["header"]["template"] == "blue"
+        assert card["header"]["title"]["content"] == "思考中" and card["header"]["template"] == "blue"
+        assert "subtitle" not in card["header"], "the bot name is redundant in its own chat"
         els = _elements(card)
         assert els[cl.ANSWER_ELEMENT_ID]["content"] == cl.SEED_PLACEHOLDER
         assert els[cl.FOOTER_ELEMENT_ID]["content"].startswith("⏳ 思考中")
@@ -280,10 +281,50 @@ class TestTurnLifecycle:
         turn = adapter._stream_cards[f"{CHAT}:t1"]
         assert (turn.card_id, turn.message_id) == (CARD_ID, MSG_ID)
 
-    def test_default_title_without_bot_name(self):
+    def test_header_never_falls_back_to_a_bot_title(self):
         adapter, fake = _adapter()
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
-        assert fake.card_of(fake.named("create")[0])["header"]["title"]["content"] == cl.DEFAULT_CARD_TITLE
+        header = fake.card_of(fake.named("create")[0])["header"]
+        assert header["title"]["content"] == "思考中" and "subtitle" not in header
+
+    def test_finalize_only_turn_still_reports_the_measured_rate(self):
+        adapter, fake = _adapter()
+
+        async def _scenario():
+            await adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1")
+            turn = adapter._stream_cards[f"{CHAT}:t1"]
+            turn.metrics = {"speed": 41.0, "model": "m"}  # official usage arrived during the turn
+            return await adapter.send_stream_frame("答案正文", finalize=True, chat_id=CHAT, turn_id="t1")
+
+        assert _run(_scenario()) is True
+        footer = _elements(fake.card_of(fake.named("update")[0]))[cl.FOOTER_ELEMENT_ID]["content"]
+        assert "41 tok/s" in footer and footer.startswith("✅ 已完成"), footer
+
+    def test_average_rate_covers_a_turn_whose_text_lands_in_one_frame(self):
+        adapter, _fake = _adapter()
+        turn = fs.StreamCardTurn(card_id="c", message_id="m", chat_id=CHAT)
+        turn.speed_tokens, turn.decode_seconds = 300, 6.0
+        assert adapter._footer(turn, fs.PHASE_DONE) == "✅ 已完成 · 0s · 50 tok/s"
+        turn.decode_seconds = 0.0
+        assert "tok/s" not in adapter._footer(turn, fs.PHASE_DONE), "no decode time, no invented rate"
+
+    def test_header_shows_the_status_instead_of_the_bot_name(self, monkeypatch):
+        monkeypatch.setattr(fs, "_WATCHDOG_POLL_SECONDS", 0.01)
+        adapter, fake = _adapter(bot_name="XMAI")
+
+        async def _scenario():
+            await adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1")
+            await adapter.send_stream_frame(SEP + "🔍 Searching▌", chat_id=CHAT, turn_id="t1")
+            await asyncio.sleep(0.05)  # watchdog applies the status to the header
+            await adapter.send_stream_frame("Hello▌", chat_id=CHAT, turn_id="t1")
+            await asyncio.sleep(0.05)
+
+        _run(_scenario())
+        seed = fake.card_of(fake.named("create")[0])["header"]
+        assert seed["title"]["content"] == "思考中" and "subtitle" not in seed
+        header = fake.card_of(fake.named("update")[-1])["header"]
+        assert header["title"]["content"] == "生成中", header
+        assert "XMAI" not in json.dumps(fake.card_of(fake.named("update")[-1]), ensure_ascii=False)
 
     def test_pushes_are_cumulative_with_increasing_sequence(self):
         adapter, fake = _adapter()
@@ -330,7 +371,7 @@ class TestTurnLifecycle:
         adapter, fake = _adapter()
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
         seed = fake.card_of(fake.named("create")[0])
-        assert seed["header"]["subtitle"]["content"] == "思考中"
+        assert seed["header"]["title"]["content"] == "思考中"
         assert _elements(seed)[cl.FOOTER_ELEMENT_ID]["content"].startswith("⏳ 思考中")
         _run(adapter.send_stream_frame(SEP + "🔍 Searching▌", chat_id=CHAT, turn_id="t1"))
         actions = json.loads(fake.named("batch")[-1].request_body.actions)
@@ -382,7 +423,7 @@ class TestTurnLifecycle:
         (update,) = fake.named("update")
         card = fake.card_of(update)
         assert card["config"]["streaming_mode"] is False and card["header"]["template"] == "green"
-        assert card["header"]["subtitle"]["content"] == "已完成"
+        assert card["header"]["title"]["content"] == "已完成"
         els = _elements(card)
         assert els[cl.ANSWER_ELEMENT_ID]["content"] == "Hello world"
         assert els[cl.TIMELINE_PANEL_ID]["header"]["title"]["content"] == "思考与工具 · 1 次工具调用"
@@ -487,7 +528,7 @@ class TestFallbackContract:
         updates = fake.named("update")
         assert len(updates) == FULL_UPDATE_ATTEMPTS + 1
         slim = fake.card_of(updates[-1])
-        assert slim["header"]["template"] == "green" and slim["header"]["subtitle"]["content"] == "已完成"
+        assert slim["header"]["template"] == "green" and slim["header"]["title"]["content"] == "已完成"
         els = _elements(slim)
         assert els[cl.ANSWER_ELEMENT_ID]["content"] == final, "one plain element, no table layout"
         assert f"{cl.ANSWER_ELEMENT_ID}_1" not in els
@@ -703,7 +744,7 @@ class TestFormulaImages:
         assert _run(_scenario()) is True
         uploads = fake.named("image")
         assert len(uploads) == 2 and all(u.request_body.image_type == "message" for u in uploads)
-        content = _elements(fake.card_of(fake.named("update")[0]))[cl.ANSWER_ELEMENT_ID]["content"]
+        content = _elements(fake.card_of(fake.named("update")[-1]))[cl.ANSWER_ELEMENT_ID]["content"]
         assert "![公式](img_1)" in content and "![公式](img_2)" in content
         assert "δₚ" in content and "$" not in content and "frac" not in content
         # Intermediate pushes never carry image markdown (typewriter text stays Unicode).
@@ -890,7 +931,7 @@ class TestAnswerLayout:
         assert elements[0]["element_id"] == cl.TIMELINE_PANEL_ID, "the one-line tool box sits under the header"
         assert elements[0]["expanded"] is False and "2 次工具调用" in elements[0]["header"]["title"]["content"]
         assert elements[1]["element_id"] == cl.ANSWER_ELEMENT_ID
-        assert card["header"]["subtitle"]["content"] == "已完成"
+        assert card["header"]["title"]["content"] == "已完成"
 
     def test_figure_blocks_are_centred_and_prose_keeps_ids(self):
         md = "开头。\n\n![曲线](img_1)\n<font color=\"grey\">图1　曲线</font>\n\n结尾。"
@@ -956,7 +997,7 @@ class TestRobustness:
         (update,) = fake.named("update")
         card = fake.card_of(update)
         assert card["header"]["template"] == "grey" and card["config"]["streaming_mode"] is False
-        assert card["header"]["subtitle"]["content"] == "暂未收到进展"
+        assert card["header"]["title"]["content"] == "暂未收到进展"
         assert _answer_text(card).startswith("partial")
 
     def test_finalized_turn_cancels_its_watchdog(self):
@@ -1025,12 +1066,12 @@ class TestLocale:
         fake.scripts["image"] = [_ok(image_key="img_a")]
         _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
         running = fake.card_of(fake.named("create")[0])
-        assert running["header"]["subtitle"]["content"] == "Thinking" and running["config"]["summary"]["content"] == "Generating…"
+        assert running["header"]["title"]["content"] == "Thinking" and running["config"]["summary"]["content"] == "Generating…"
         _run(adapter.send_stream_frame(SEP + "🔍 Searching▌", chat_id=CHAT, turn_id="t1"))
         assert "1 tool calls" in fake.named("batch")[0].request_body.actions
         assert _run(adapter.send_stream_frame("Table 1: results\n| a |\n|---|\n| 1 |", finalize=True, chat_id=CHAT, turn_id="t1")) is True
         done = fake.card_of(fake.named("update")[0])
-        assert done["header"]["subtitle"]["content"] == "Done"
+        assert done["header"]["title"]["content"] == "Done"
         assert _elements(done)[cl.FOOTER_ELEMENT_ID]["content"].startswith("✅ Done · ")
         assert "Table 1　results" in _answer_text(done)
         f = tmp_path / "hermes_fig_ash_trend_1725600000.png"; f.write_bytes(b"png")
@@ -1068,8 +1109,7 @@ class TestIdleWatchdog:
 
         assert _run(_scenario()) is True
         assert f"{CHAT}:t1" not in adapter._stream_cards, "sealed once it fell silent"
-        (update,) = fake.named("update")
-        assert fake.card_of(update)["header"]["template"] == "grey"
+        assert fake.card_of(fake.named("update")[-1])["header"]["template"] == "grey"
 
     def test_idle_sealed_turn_is_revived_in_the_same_card(self, monkeypatch):
         self._fast(monkeypatch)
@@ -1085,9 +1125,12 @@ class TestIdleWatchdog:
 
         assert _run(_scenario()) is True
         assert len(fake.named("create")) == 1, "no second card"
-        stopped, revived, done = [fake.card_of(u) for u in fake.named("update")]
+        updates = [fake.card_of(u) for u in fake.named("update")]
+        stopped = next(card for card in updates if card["header"]["template"] == "grey")
+        revived = next(card for card in updates
+                       if card["header"]["template"] == "blue" and card["config"]["streaming_mode"] is False)
+        done = updates[-1]
         assert stopped["header"]["template"] == "grey"
-        assert revived["header"]["template"] == "blue" and revived["config"]["streaming_mode"] is False
         assert _elements(revived)[cl.TIMELINE_ELEMENT_ID]["content"] == "💻 terminal"
         assert done["header"]["template"] == "green"
         assert _elements(done)[cl.ANSWER_ELEMENT_ID]["content"] == "思考中，结论如下。"
@@ -1136,7 +1179,7 @@ class TestIdleWatchdog:
         assert "oc_other:t2" in adapter._stream_cards, "other chats are untouched"
         (update,) = fake.named("update")
         card = fake.card_of(update)
-        assert update.card_id == "card_1" and card["header"]["subtitle"]["content"] == "已停止"
+        assert update.card_id == "card_1" and card["header"]["title"]["content"] == "已停止"
         assert _answer_text(card) == "回答到一半"
 
     def test_interrupt_respects_thread_metadata(self, monkeypatch):

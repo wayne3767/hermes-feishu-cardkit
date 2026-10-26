@@ -3,7 +3,7 @@
 Nothing here touches the network or adapter state; ``streaming.py`` owns the turn lifecycle and
 calls into these functions with plain data.  Layout of a completed card:
 
-    header      title = bot name, subtitle = 思考中 / 调用工具中 / 生成中 / 已完成 / 已停止
+    header      title = 思考中 / 调用工具中 / 生成中 / 已完成 / 已停止 (the bot name is not shown)
     timeline    collapsible panel "思考与工具 · N 次工具调用" — FIRST in the body, one line while
                 collapsed; expanding it shows every recorded tool (and skill) call
     answer      prose markdown; each figure (image + ``图N　标题`` caption) is its own centred
@@ -612,7 +612,9 @@ def build_stream_card(
     answer in one element instead of the figure / table layout (the slim fallback card).
 
     The tool panel is the FIRST body element — under the header and above the answer — and stays
-    one line until the reader expands it.  ``status`` overrides the header subtitle word."""
+    one line until the reader expands it.  ``status`` overrides the phase word.  The header shows
+    that word alone: the bot name is redundant inside the bot's own chat, so ``title`` is accepted
+    for callers but not rendered."""
     subtitle = status or phase_label(phase, labels)
     template = _PHASE_TEMPLATE.get(phase, "grey")
     running = phase in ACTIVE_PHASES
@@ -646,8 +648,7 @@ def build_stream_card(
     return {
         "schema": "2.0",
         "config": config,
-        "header": {"title": {"tag": "plain_text", "content": title},
-                   "subtitle": {"tag": "plain_text", "content": subtitle}, "template": template},
+        "header": {"title": {"tag": "plain_text", "content": subtitle}, "template": template},
         "body": {"elements": elements},
     }
 

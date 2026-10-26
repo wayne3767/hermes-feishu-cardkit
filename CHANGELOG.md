@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2 — 2026-10-27
+
+- The card title is now the turn status alone (思考中 / 调用工具中 / 生成中 / 已完成 …). The bot name
+  was redundant inside the bot's own chat and is no longer rendered; a status change refreshes the
+  title through the same mid-stream full update that adds the Stop button.
+- Decode speed is shown more often: the footer samples the final text as well, so a turn whose
+  answer lands in one or two frames still gets a rate; when official usage is missing the footer
+  falls back to tokens over the accumulated decoding time (gaps longer than 10 s count as tool
+  time and are excluded), and the live window now starts at a 1 s span.
+- Offline preview renders the status as the card heading.
+
 ## 0.5.1 — 2026-10-27
 
 - Fix a Hermes 0.22+ regression: the plugin replaced the bundled Feishu registry entry without

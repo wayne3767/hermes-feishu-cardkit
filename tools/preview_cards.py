@@ -88,7 +88,7 @@ def _index_html(cards: dict[str, dict[str, Any]], manifest: dict[str, Any]) -> s
         header = card["header"]
         pieces.append(
             f'<article class="card {_escape(header["template"])}" id="{phase}"><header>'
-            f'<h2>{_escape(header["subtitle"]["content"])}</h2><span>{_escape(header["title"]["content"])}</span>'
+            f'<h2>{_escape(header["title"]["content"])}</h2><span>{_escape(phase)}</span>'
             f'<a href="{phase}.json">卡片 JSON</a></header><section>'
             + "".join(_element_html(element) for element in card["body"]["elements"])
             + "</section></article>")

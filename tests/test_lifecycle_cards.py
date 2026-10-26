@@ -67,7 +67,7 @@ def test_seed_before_agent_events_waits_without_false_stop_then_shows_actual_usa
         assert turn.phase == "waiting_input"
         assert turn in adapter._stream_cards.values(), "an explicit wait outlives the text idle threshold"
         waiting = fake.card_of(fake.named("update")[-1])
-        assert waiting["header"]["subtitle"]["content"] == "等待输入"
+        assert waiting["header"]["title"]["content"] == "等待输入"
         store.observe("on_human_input_resolved", **event, request_id="ask-1", outcome="answered")
         for _ in range(2):  # duplicate transport observation is counted once
             store.observe("post_api_request", **event, api_request_id="req-2", response_model="fallback-model",
@@ -80,7 +80,7 @@ def test_seed_before_agent_events_waits_without_false_stop_then_shows_actual_usa
 
     final = _run(scenario())
     footer = _elements(final)[cl.FOOTER_ELEMENT_ID]["content"]
-    assert final["header"]["subtitle"]["content"] == "已完成"
+    assert final["header"]["title"]["content"] == "已完成"
     assert "fallback-model" in footer and "configured-model" not in footer
     assert footer.startswith("✅ 已完成 · ")
     assert "↑320" in footer and "↓40" in footer and "200/2,000 (10%)" in footer, "opt-in usage stays available" 
@@ -122,7 +122,7 @@ def test_status_labels_are_distinct_and_terminal_buttons_retire():
         card = cl.build_stream_card(title="T", markdown="body", timeline_md="tool", tool_count=1,
                                     footer=cl.render_footer(phase=phase, tool_count=1, elapsed=2),
                                     phase=phase, stop_button=True)
-        assert card["header"]["subtitle"]["content"] == label
+        assert card["header"]["title"]["content"] == label
         if phase in {"failed", "blocked", "timeout"}:
             assert cl.STOP_BUTTON_ID not in _elements(card)
 
@@ -219,21 +219,21 @@ def test_real_gateway_boundary_is_a_segment_and_continues_observing_timeout(monk
         consumer._accumulated = "我需要确认"
         assert await consumer._finalize_boundary_stream("Clarify")
         segment = fake.card_of(fake.named("update")[-1])
-        assert segment["header"]["subtitle"]["content"] == "本段已结束"
+        assert segment["header"]["title"]["content"] == "本段已结束"
         assert not adapter._stream_cards and adapter._observed_segments
         event = dict(profile_scope="/test/profile-a", context=context, session_id="s-1", turn_id="agent-turn-1")
         store.observe("on_human_input_request", **event, request_id="ask", kind="clarify")
         await asyncio.sleep(.03)
-        assert fake.card_of(fake.named("update")[-1])["header"]["subtitle"]["content"] == "等待输入"
+        assert fake.card_of(fake.named("update")[-1])["header"]["title"]["content"] == "等待输入"
         store.observe("on_human_input_resolved", **event, request_id="ask", outcome="timeout")
         await asyncio.sleep(.03)
         card = fake.card_of(fake.named("update")[-1])
-        assert card["header"]["subtitle"]["content"] == "已超时"
+        assert card["header"]["title"]["content"] == "已超时"
         assert cl.STOP_BUTTON_ID not in _elements(card)
         store.observe("on_session_end", **event, completed=True, failed=False, interrupted=False)
         await asyncio.sleep(.03)
         assert not adapter._observed_segments
-        assert fake.card_of(fake.named("update")[-1])["header"]["subtitle"]["content"] == "本段已结束"
+        assert fake.card_of(fake.named("update")[-1])["header"]["title"]["content"] == "本段已结束"
     _run(scenario())
 
 
@@ -251,7 +251,7 @@ def test_lost_wait_observation_becomes_unknown_instead_of_waiting_forever(monkey
         await asyncio.sleep(.15)
         assert not adapter._stream_cards
     _run(scenario())
-    assert fake.card_of(fake.named("update")[-1])["header"]["subtitle"]["content"] == "暂未收到进展"
+    assert fake.card_of(fake.named("update")[-1])["header"]["title"]["content"] == "暂未收到进展"
 
 
 def test_image_attachment_keeps_failed_state(monkeypatch):
@@ -271,7 +271,7 @@ def test_image_attachment_keeps_failed_state(monkeypatch):
         adapter._upload_image = upload
         assert await adapter._embed_images(done, [("/tmp/example.png", "figure")], None)
     _run(scenario())
-    assert fake.card_of(fake.named("update")[-1])["header"]["subtitle"]["content"] == "执行失败"
+    assert fake.card_of(fake.named("update")[-1])["header"]["title"]["content"] == "执行失败"
 
 
 def test_closed_segment_terminal_update_retries_before_retiring_observer(monkeypatch):
@@ -292,7 +292,7 @@ def test_closed_segment_terminal_update_retries_before_retiring_observer(monkeyp
         assert len(fake.named("update")) >= before + 2
         assert not adapter._observed_segments
     _run(scenario())
-    assert fake.card_of(fake.named("update")[-1])["header"]["subtitle"]["content"] == "执行失败"
+    assert fake.card_of(fake.named("update")[-1])["header"]["title"]["content"] == "执行失败"
 
 
 def test_shutdown_retires_observed_waiting_segment_without_claiming_completion(monkeypatch):
@@ -308,7 +308,7 @@ def test_shutdown_retires_observed_waiting_segment_without_claiming_completion(m
         await adapter.close_open_stream_cards()
         assert not adapter._observed_segments
     _run(scenario())
-    assert fake.card_of(fake.named("update")[-1])["header"]["subtitle"]["content"] == "暂未收到进展"
+    assert fake.card_of(fake.named("update")[-1])["header"]["title"]["content"] == "暂未收到进展"
 
 
 def test_optional_binding_failure_cannot_block_original_inbound_handler(monkeypatch):
