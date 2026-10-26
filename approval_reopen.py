@@ -67,7 +67,10 @@ def install_approval_reopen(*, consumer_cls: Optional[type] = None) -> bool:
         # turns its approval boundary into a re-openable one.
         if not reopen and reason != "Clarify" and _is_card_adapter(getattr(self, "adapter", None)):
             reopen = True
-            _boundaries[str(getattr(self, "chat_id", "") or "")] = time.monotonic()
+            # Only a boundary that will actually finalize an open stream needs the segment
+            # marker; otherwise a later turn in the same chat could inherit it.
+            if getattr(self, "_use_native_streaming", False) and getattr(self, "_native_stream_opened", False):
+                _boundaries[str(getattr(self, "chat_id", "") or "")] = time.monotonic()
         return original(self, placeholder, reason=reason, reopen=reopen)
 
     setattr(close_for_approval_prompt, _PATCHED_FLAG, True)

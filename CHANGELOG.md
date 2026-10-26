@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 — 2026-10-27
+
+- The approval segment marker is recorded only when the boundary will actually finalize an
+  open stream, so a later turn in the same chat cannot inherit it and seal as "本段已结束".
+
 ## 0.6.0 — 2026-10-27
 
 - **Approvals continue in a card.** Hermes finalizes the native stream at an approval prompt and
