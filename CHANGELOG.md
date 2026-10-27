@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1 — 2026-10-27
+
+- Add `platforms.feishu.card_model_label` / `FEISHU_CARD_MODEL_LABEL`: a profile-scoped
+  public name that replaces the model name in every card footer, including live updates.
+  API routing, observed backend model and usage metrics remain unchanged. Empty keeps the
+  existing observed-model behavior; labels are bounded plain identifiers.
+
+
 ## 0.8.0 — 2026-10-27
 
 - Replace expandable tool history with one live activity line. New tool or skill activity

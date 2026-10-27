@@ -2,7 +2,7 @@
 
 Native streaming cards for the Feishu / Lark channel of [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Version **0.8.0** uses one live activity line, accurate turn states, and a status · duration · decode speed · model footer.
+Version **0.8.1** adds a profile-specific public model label to the live activity and status · duration · decode speed · model footer.
 
 [English](#english) · [中文](#中文)
 
@@ -53,6 +53,7 @@ Optional: display formulas are typeset as images when the `matplotlib` package i
 | `FEISHU_CRON_CARD` / `platforms.feishu.cron_card` | `true` | `false` sends cron output as ordinary messages again |
 | `FEISHU_CRON_CARD_TEMPLATE` / `platforms.feishu.cron_card_template` | `violet` | Header colour of cron cards (a Feishu card template name); failures stay `red` |
 | `FEISHU_CARD_FOOTER_USAGE` / `platforms.feishu.card_footer_usage` | `false` | `true` adds provider, per-turn input/output tokens and context usage to the footer |
+| `FEISHU_CARD_MODEL_LABEL` / `platforms.feishu.card_model_label` | empty | Public model name for this profile's footer; replaces the observed name in display only, without changing API requests or recorded metrics |
 | `FEISHU_CARD_READING_PRESET` / `platforms.feishu.card_reading_preset` | `classic` | `classic`, `task` or `detailed` |
 | `FEISHU_CARD_WIDTH_MODE` / `platforms.feishu.card_width_mode` | preset | `default`, `compact` or `fill` |
 | `display.platforms.feishu.tool_progress` | Hermes default `new` | `all` supplies complete legacy progress events; the card retains only the latest line |
@@ -142,6 +143,7 @@ hermes gateway restart
 | `FEISHU_CRON_CARD` / `platforms.feishu.cron_card` | `true` | 设为 `false` 时定时任务输出恢复为普通消息 |
 | `FEISHU_CRON_CARD_TEMPLATE` / `platforms.feishu.cron_card_template` | `violet` | 定时任务卡片标题栏颜色（飞书卡片模板名）；失败始终为 `red` |
 | `FEISHU_CARD_FOOTER_USAGE` / `platforms.feishu.card_footer_usage` | `false` | 设为 `true` 时页脚额外显示供应方、本轮输入/输出 token 与上下文占用 |
+| `FEISHU_CARD_MODEL_LABEL` / `platforms.feishu.card_model_label` | 空 | 本 profile 页脚的对外模型名称；只替换显示，不改请求使用的模型或实际统计；留空时显示观测到的模型名 |
 | `FEISHU_CARD_READING_PRESET` / `platforms.feishu.card_reading_preset` | `classic` | `classic` 默认宽度，`task` / `detailed` 填充宽度（保留旧配置名） |
 | `FEISHU_CARD_WIDTH_MODE` / `platforms.feishu.card_width_mode` | 随预设 | `default`、`compact`、`fill` |
 | `display.platforms.feishu.tool_progress` | Hermes 默认 `new` | 设为 `all` 时提供完整的兼容进度事件；卡片只保留最新动态 |

@@ -899,6 +899,7 @@ class FeishuStreamingCardMixin:
             phase=phase, tool_count=turn.tool_count, elapsed=turn.elapsed,
             status=self._status(turn, phase), speed=self._speed(turn, phase), labels=self._labels,
             metrics=turn.metrics, show_usage=bool(getattr(self, "_footer_usage", False)),
+            model_label=getattr(self, "_card_model_label", ""),
         )
 
     def _status(self, turn: StreamCardTurn, phase: str) -> str:

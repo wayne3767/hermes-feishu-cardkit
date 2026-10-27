@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -97,6 +98,9 @@ class CardkitFeishuAdapter(CardInteractionMixin, FeishuStreamingCardMixin, _bund
         self._cron_card = _truthy(_setting(extra, "cron_card", "FEISHU_CRON_CARD", "true"))
         # Token/context usage in the footer is opt-in: the default line is status · 时长 · 模型.
         self._footer_usage = _truthy(_setting(extra, "card_footer_usage", "FEISHU_CARD_FOOTER_USAGE", "false"))
+        model_label = _setting(extra, "card_model_label", "FEISHU_CARD_MODEL_LABEL", "")
+        self._card_model_label = (model_label.strip() if isinstance(model_label, str)
+                                 and re.fullmatch(r"[\w./:+-]{1,160}", model_label.strip()) else "")
         template = str(_setting(extra, "cron_card_template", "FEISHU_CRON_CARD_TEMPLATE", DEFAULT_TEMPLATE)).strip().lower()
         if template not in TEMPLATES:
             logger.warning("[Feishu] unknown cron card template %r; using %s", template, DEFAULT_TEMPLATE)

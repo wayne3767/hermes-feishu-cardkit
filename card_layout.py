@@ -293,7 +293,7 @@ def render_activity(latest: str, *, phase: str, tool_count: int, labels: Labels 
 
 def render_footer(*, phase: str, tool_count: int, elapsed: float, model: str = "", activity: str = "",
                   labels: Labels = ZH, metrics: Optional[Dict[str, Any]] = None, status: str = "",
-                  show_usage: bool = False, speed: str = "") -> str:
+                  show_usage: bool = False, speed: str = "", model_label: str = "") -> str:
     """One footer line: status · elapsed · decode speed · model (· usage when opted in).
 
     ``status`` carries the granular running word from ``status_label``; without it a running
@@ -308,13 +308,16 @@ def render_footer(*, phase: str, tool_count: int, elapsed: float, model: str = "
              format_duration(elapsed)]
     if speed:
         parts.append(speed)
-    if model:
+    if model_label:
+        parts.append(model_label)
+    elif model:
         parts.append(model)
     if metrics:
         # Metrics already belong to a verified turn. Missing values stay absent; never show
         # the configured default model as evidence of which provider served this request.
         actual = metrics.get("model")
-        if isinstance(actual, str) and actual and actual not in parts:
+        # An explicit public label is presentation-only; keep the original metrics intact.
+        if not model_label and isinstance(actual, str) and actual and actual not in parts:
             parts.append(actual)
         if show_usage:
             provider = metrics.get("provider")
