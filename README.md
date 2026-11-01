@@ -2,7 +2,7 @@
 
 Native streaming cards for the Feishu / Lark channel of [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Version **0.8.2** keeps the tool chain out of the answer body when the answer is mid-code-block or a tool line repeats.
+Version **0.8.3** keeps a tool boundary in the same card; **0.8.2** keeps the tool chain out of the answer body.
 
 [English](#english) · [中文](#中文)
 
@@ -16,7 +16,7 @@ Out of the box, Hermes delivers a Feishu/Lark reply as a plain message that gets
 
 - The card appears the moment the model starts; text renders with the platform's typewriter animation as tokens arrive.
 - The card title is the status word itself — the bot name is not repeated inside its own chat: **Thinking** before anything arrives, **Working** while a tool is running, **Generating** while text flows, then **Done** (plus waiting, stopped, failed and timed-out states). While the card is quiet the footer refreshes every few seconds so the elapsed time keeps moving — a long tool call never looks frozen.
-- **One live activity line above the answer** shows the current tool or skill. Each update replaces the previous line. The finished card shows a count; detailed calls remain in Hermes session history.
+- **One live activity line above the answer** shows the current tool or skill. Each update replaces the previous line. The finished card shows a count; detailed calls remain in Hermes session history. A tool boundary keeps the **same card**: the answer and the activity line stay where they are while the rest of the turn streams in.
 - An approval prompt closes the current card as a segment; approving or denying re-opens a **fresh card** for the rest of the turn (tool calls and answer included), instead of scattering the continuation into ordinary messages.
 - The footer reads **status · elapsed · decode speed · model**, e.g. "Generating · 45s · 31 tok/s · deepseek-v4.1-flash". The running figure is a windowed estimate from the text landed so far and disappears when no text has arrived for a while; official output tokens and streaming timestamps supply the finished rate. Estimates carry ≈; missing timing is not presented as a measurement. The model is known before the first token and is replaced by the model the response actually served once that event arrives; per-turn tokens and context usage are one opt-in setting.
 - Inline LaTeX becomes Unicode math text (`\delta_p` → δₚ, `\frac{a}{b}` → (a)/(b)); display formulas are typeset into images when `matplotlib` is available.
@@ -79,7 +79,7 @@ The card can embed figures and caption them, but whether the model draws anythin
 - Matrices, `cases`, multi-line alignment environments and formulas containing CJK text are not typeset as images; they fall back to Unicode.
 - Card JSON is capped at 30 KB; the whole card is measured, tool lines give way first, and an oversized answer shows its head in the card while the full text goes out as ordinary messages. While streaming, an oversized answer shows its newest paragraphs.
 - CardKit ends streaming mode after 10 minutes; longer turns keep updating the same card with full updates (no typewriter effect).
-- `/stop` and `/new` affect only cards matched to that session. Five minutes without text means "No recent progress"; an observed human wait remains waiting. Interaction boundaries are labeled as closed segments, not completed tasks.
+- `/stop` and `/new` affect only cards matched to that session. Five minutes without text means "No recent progress"; an observed human wait remains waiting. A pause for an approval or a question is labeled as a closed segment, not a completed task; a tool boundary is not a segment and does not split the card.
 - Metrics use official events and exact inbound identity. The running decode rate is an estimate (CJK ≈ 1 token, other runs ≈ 4 characters per token) refreshed while text streams; the finished card uses official output tokens over streaming time. Unsupported Hermes versions, ambiguous routing and some queued messages have no metrics: the footer then shows only status, elapsed time, the estimated rate and (when `pre_llm_call` matched) the declared model. Missing values are hidden; input totals use canonical prompt tokens including cache buckets. Context usage describes the latest request rather than cumulative spend. Raw model reasoning is not exposed.
 - Single-choice clarification cards use the original Hermes resolver. Multi-select/open-ended prompts and webhook mode keep the bundled text interaction. Approval handling remains bundled. Navigation requires a matching successful platform receipt; transport retries can still duplicate delivery after an ambiguous network failure.
 - Optional observations and native clarification need Hermes's pinned routing identity and lifecycle hooks. Older versions retain basic cards and text interaction; uncertain profile ownership never borrows another profile's state or settings.
@@ -107,7 +107,7 @@ Hermes 的飞书通道默认把回复作为普通消息反复编辑。这个插�
 
 - 模型开始生成时卡片立刻出现，文字以打字机效果逐步渲染
 - 状态词跟着回合走：还没有任何输出时是“思考中”，工具执行时是“调用工具中”，文字流动时是“生成中”，结束时是“已完成”（另有等待确认、等待输入、已停止、执行失败、已超时等状态）。卡片静默时页脚每几秒刷新一次时长，长时间的单个工具调用也不会显得卡死
-- **标题栏下只显示一条实时动态**：当前工具或技能的新动态替换上一条，不保留展开/收起功能。结束后显示本轮调用次数；详细记录仍可在 Hermes 会话历史中查询
+- **标题栏下只显示一条实时动态**：当前工具或技能的新动态替换上一条，不保留展开/收起功能。结束后显示本轮调用次数；详细记录仍可在 Hermes 会话历史中查询。工具调用边界不再分段：正文和动态行留在原卡片，后续内容继续写进同一张卡
 - 审批提示会把当前卡片封为“本段已结束”；批准或拒绝后，剩余回合会**新开一张卡片**继续写（工具链和正文都在卡里），不再散落到普通消息
 - 页脚为**状态 · 时长 · 解码速度 · 模型**，例如“⏳ 生成中 · 45s · 31 tok/s · deepseek-v4.1-flash”：运行中的速度是已落地文本的窗口估计，长时间没有新文本就不显示；有官方时间戳时，以输出 token 除以流式时长（首个分片到结束）；估计值带“≈”，缺少有效计时则隐藏。模型在首个 token 前即可显示，收到官方事件后换成实际服务的模型；本轮 token 与上下文占用改为可选配置
 - 标题栏只显示状态（思考中 / 调用工具中 / 生成中 / 已完成等），不再重复 bot 名称
@@ -170,7 +170,7 @@ hermes gateway restart
 - 矩阵、分段函数、多行对齐环境和含中文的公式不做图片排版，退回 Unicode 文本。
 - 卡片 JSON 上限 30 KB；按整张卡片计量；仍超长的回答在卡片里显示开头部分，完整内容由 Hermes 按普通消息发出。生成过程中超长时显示最新几段。
 - CardKit 流式模式 10 分钟后自动关闭；更长的回合继续用整卡更新刷新同一张卡片（没有打字机效果）。
-- `/stop`、`/new` 只更新精确匹配会话的卡片。5 分钟无文本显示"暂未收到进展"；已观测到的人工等待保持等待状态。审批/澄清前的流式结束仅表示"本段已结束"，不会冒充整个任务完成。
+- `/stop`、`/new` 只更新精确匹配会话的卡片。5 分钟无文本显示"暂未收到进展"；已观测到的人工等待保持等待状态。审批/澄清前的流式结束仅表示"本段已结束"，不会冒充整个任务完成；工具调用边界不属于分段，不会拆成两张卡片。
 - 模型和用量通过官方事件按原始消息、profile、会话和回合关联。缺少事件、归属有歧义或部分排队路径缺少准入事件时，隐藏用量统计；模型名优先取官方事件，取不到时用 `pre_llm_call` 的声明值（不是配置默认值）。运行中的解码速度是按已落地文本做的窗口估计（中文约 1 token、其他字符约 4 字符 1 token），结束后改用官方输出 token 除以流式时长。输入总量使用包含缓存的 canonical prompt tokens；上下文占用取最近请求，不是本轮累计消耗。不显示模型原始思考。
 - 单选澄清使用原生按钮与原 Hermes resolver，保留问题、选项和实际回答；多选、开放式问题、webhook 模式和来源无法证明的请求沿用原文本交互。迟到发送回执会补刷已超时或已回答的问题。审批继续使用 Hermes 原有流程。只有同一次成功送达回执中的链接或位置得到验证才显示"查看续答"；网络回执丢失时，上游重试仍可能重复投递。
 - 新统计和原生澄清依赖上游固定的路由身份及生命周期事件。旧版 Hermes 保留基础卡片与文本交互，不显示无法证明归属的控件和统计。

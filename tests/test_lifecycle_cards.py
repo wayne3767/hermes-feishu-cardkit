@@ -154,6 +154,8 @@ def test_metrics_only_frame_refreshes_footer_without_closing_typewriter(monkeypa
 
 def test_real_gateway_boundary_is_a_segment_and_continues_observing_timeout(monkeypatch):
     from gateway.stream_consumer import GatewayStreamConsumer
+    from feishu_cardkit import approval_reopen
+    approval_reopen.install_approval_reopen()
     store = lifecycle.ObservationStore()
     monkeypatch.setattr(lifecycle, "OBSERVATIONS", store)
     monkeypatch.setattr(fs, "_WATCHDOG_POLL_SECONDS", .01)
@@ -163,6 +165,9 @@ def test_real_gateway_boundary_is_a_segment_and_continues_observing_timeout(monk
         consumer = GatewayStreamConsumer(adapter, CHAT, initial_reply_to_id="in-1")
         await consumer._send_frame("我需要确认", finalize=False)
         consumer._accumulated = "我需要确认"
+        consumer._use_native_streaming = consumer._native_stream_opened = True
+        # The real path: close_for_approval_prompt records the pause before the boundary frame.
+        consumer.close_for_approval_prompt("我需要确认", reason="Clarify")
         assert await consumer._finalize_boundary_stream("Clarify")
         segment = fake.card_of(fake.named("update")[-1])
         assert segment["header"]["title"]["content"] == "本段已结束"
@@ -180,6 +185,34 @@ def test_real_gateway_boundary_is_a_segment_and_continues_observing_timeout(monk
         await asyncio.sleep(.03)
         assert not adapter._observed_segments
         assert fake.card_of(fake.named("update")[-1])["header"]["title"]["content"] == "本段已结束"
+    _run(scenario())
+
+
+def test_tool_boundary_keeps_the_same_card_instead_of_a_segment(monkeypatch):
+    """Hermes finalizes the transport at every tool start; the turn continues, so must the card."""
+    store = lifecycle.ObservationStore()
+    monkeypatch.setattr(lifecycle, "OBSERVATIONS", store)
+    admitted(store)
+    adapter, fake = _adapter()
+    async def scenario():
+        await adapter.send_stream_frame("我先查一下", chat_id=CHAT, reply_to="in-1", turn_id="c")
+        await adapter.send_stream_frame("我先查一下" + fs._PROGRESS_SEPARATOR + "🐍 运行代码：df.head()▌",
+                                        chat_id=CHAT, turn_id="c")
+        cards_before = len(fake.named("create")) + len(fake.named("im_create"))
+        # The consumer's boundary frame: the answer alone, finalize=True, is_turn_final=False.
+        assert await adapter.send_stream_frame("我先查一下", finalize=True, chat_id=CHAT, turn_id="c") is True
+        assert f"{CHAT}:c" in adapter._stream_cards, "the card stays open for the rest of the turn"
+        assert not adapter._observed_segments, "no segment is closed at a tool boundary"
+        assert len(fake.named("create")) + len(fake.named("im_create")) == cards_before, "no second card"
+        # The consumer keeps its overlay, so the next frame re-sends the whole chain.
+        await adapter.send_stream_frame("我先查一下" + fs._PROGRESS_SEPARATOR
+                                        + "🐍 运行代码：df.head()\n🐍 运行代码：df.describe()▌",
+                                        chat_id=CHAT, turn_id="c")
+        turn = adapter._stream_cards[f"{CHAT}:c"]
+        assert turn.tool_total == 2, "the boundary frame must not count the chain twice"
+        assert turn.answer == "我先查一下"
+        assert turn.activity == "🐍 运行代码：df.describe()"
+        assert adapter._status(turn, "running") == "调用工具中"
     _run(scenario())
 
 
@@ -271,6 +304,7 @@ def test_optional_binding_failure_cannot_block_original_inbound_handler(monkeypa
 
 
 def test_long_boundary_observation_never_restores_stale_partial_text(monkeypatch):
+    from feishu_cardkit import approval_reopen
     store = lifecycle.ObservationStore()
     monkeypatch.setattr(lifecycle, "OBSERVATIONS", store)
     monkeypatch.setattr(fs, "_WATCHDOG_POLL_SECONDS", .01)
@@ -278,6 +312,7 @@ def test_long_boundary_observation_never_restores_stale_partial_text(monkeypatch
     adapter, fake = _adapter()
     async def scenario():
         await adapter.send_stream_frame("旧正文", chat_id=CHAT, reply_to="in-1", turn_id="c")
+        approval_reopen.mark_boundary(adapter, f"{CHAT}:c", "Clarify")  # a real pause, not a tool boundary
         assert not await adapter.send_stream_frame("最新正文\n\n" + "完整内容。" * 6000,
                                                     finalize=True, chat_id=CHAT, turn_id="c")
         store.observe("on_human_input_request", profile_scope="/test/profile-a", context=context,
@@ -290,6 +325,7 @@ def test_long_boundary_observation_never_restores_stale_partial_text(monkeypatch
 
 def test_boundary_footer_fallback_still_says_segment_ended(monkeypatch):
     from test_streaming_card import _fail
+    from feishu_cardkit import approval_reopen
     store = lifecycle.ObservationStore()
     monkeypatch.setattr(lifecycle, "OBSERVATIONS", store)
     monkeypatch.setattr(fs, "FINAL_UPDATE_RETRY_DELAYS", ())
@@ -297,6 +333,7 @@ def test_boundary_footer_fallback_still_says_segment_ended(monkeypatch):
     adapter, fake = _adapter()
     async def scenario():
         await adapter.send_stream_frame("preamble", chat_id=CHAT, reply_to="in-1", turn_id="c")
+        approval_reopen.mark_boundary(adapter, f"{CHAT}:c", "Approval")
         fake.scripts["update"] = [_fail(999), _fail(999)]
         await adapter.send_stream_frame("preamble", finalize=True, chat_id=CHAT, turn_id="c")
     _run(scenario())

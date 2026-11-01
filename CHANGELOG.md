@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.3 — 2026-11-01
+
+- **A tool boundary keeps the same card.** Hermes finalizes the native transport at every tool
+  start once text has flowed (and at a flush barrier), which is not the end of the turn. The card
+  used to seal itself as "本段已结束" and open a second card for the rest of the turn; now the
+  answer, the one activity line and the tool count stay in the card that is already on screen.
+  The decision uses the official turn observation (the turn is still running) plus the pause
+  marker Hermes sets for approval and clarify prompts, so a real pause and an explicit interrupt
+  keep the segment behaviour and an older Hermes without observations keeps the old fallback.
+  The consumer's overlay survives a boundary, so the tool count is not counted twice.
+
 ## 0.8.2 — 2026-11-01
 
 - **Tool lines no longer leak into the answer.** Hermes marks the composed frame around the

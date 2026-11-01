@@ -283,6 +283,20 @@ def _overlay_tail(head: str, lines: List[str]) -> List[str]:
     return tail
 
 
+def _continues_in_same_card(turn: StreamCardTurn, pause_reason: Optional[str]) -> bool:
+    """Is this transport finalize a tool boundary rather than the end of the turn?
+
+    Only the official turn observation proves the turn continues, so a deployment without it
+    keeps the older segment behaviour (seal the card, open a fresh one for the continuation).
+    A real pause (approval / clarify prompt, which Hermes delivers as its own message) and an
+    explicit interrupt keep that behaviour too."""
+    if pause_reason is not None or turn.stop_requested_at is not None:
+        return False
+    if turn.phase in {PHASE_WAITING_APPROVAL, PHASE_WAITING_INPUT}:
+        return False
+    return turn.observation_terminal is False
+
+
 def _same_overlay(lines: Sequence[str], known: Sequence[str]) -> bool:
     """Does this tail still open with the overlay this card already read as activity?"""
     seen = [line.strip() for line in known if line.strip()]
@@ -623,10 +637,14 @@ class FeishuStreamingCardMixin:
         logger.info("[Feishu] streaming card %s revived: its turn sent a frame after the idle seal", turn.card_id)
         return turn
 
-    async def _push(self, turn: StreamCardTurn, text: str) -> bool:
-        """Cumulative intermediate frame; failures are fire-and-forget (the next frame overwrites)."""
+    async def _push(self, turn: StreamCardTurn, text: str, *, boundary: bool = False) -> bool:
+        """Cumulative intermediate frame; failures are fire-and-forget (the next frame overwrites).
+
+        ``boundary`` marks a transport finalize that does not end the turn: its frame is the answer
+        alone while the consumer keeps its overlay, so the card keeps the overlay it already shows
+        instead of counting the whole tool chain again."""
         answer, overlay = split_stream_frame(text, turn.answer, turn.overlay)
-        activity_changed = merge_overlay(turn, overlay)
+        activity_changed = merge_overlay(turn, overlay) if (overlay or not boundary) else False
         if turn.stale and not turn.streaming_closed:
             turn.streaming_closed = True
             logger.info("[Feishu] streaming card %s passed the streaming window; continuing with full updates", turn.card_id)
@@ -684,15 +702,21 @@ class FeishuStreamingCardMixin:
         return True
 
     async def _finalize(self, key: str, turn: StreamCardTurn, text: str) -> bool:
-        """Land the final text, then seal with the completed layout; False hands delivery back."""
+        """Land the final text, then seal with the completed layout; False hands delivery back.
+
+        Hermes finalizes the native transport at every tool start once text has flowed (and at a
+        flush barrier).  Those are not the end of the turn: the card keeps its answer and its one
+        activity line, and the rest of the turn streams into the same card."""
+        self._observe_turn(turn)
+        pause_reason = approval_reopen.consume_boundary(self, key)
+        if _continues_in_same_card(turn, pause_reason):
+            return await self._push(turn, text, boundary=True)
         self._stream_cards.pop(key, None)
         if turn.watchdog is not None:
             turn.watchdog.cancel()
-        self._observe_turn(turn)
         # Hermes also finalizes an interim segment before a human prompt. Only the official
         # terminal event proves the entire agent turn finished; a transport finalize does not.
-        approval_boundary = approval_reopen.consume_approval_boundary(self, key)
-        turn.segment_finalized = turn.observation_terminal is False or approval_boundary
+        turn.segment_finalized = turn.observation_terminal is False or pause_reason is not None
         phase = (turn.phase if turn.segment_finalized or turn.phase in {
             PHASE_STOPPED, PHASE_FAILED, PHASE_BLOCKED, PHASE_TIMEOUT} else PHASE_DONE)
         turn.phase = phase

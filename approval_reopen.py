@@ -26,15 +26,36 @@ logger = logging.getLogger("hermes_feishu_cardkit.approval_reopen")
 _PATCHED_FLAG = "_hermes_cardkit_approval_reopen"
 # A marker belongs to this adapter and this transport turn, never a chat alone.
 _BOUNDARY_TTL_SECONDS = 300.0
+_BOUNDARIES_ATTR = "_cardkit_pause_boundaries"
+
+
+def mark_boundary(adapter: Any, key: str, reason: str) -> None:
+    """Record the pause that will finalize this adapter's transport turn (approval / clarify)."""
+    boundaries = adapter.__dict__.setdefault(_BOUNDARIES_ATTR, {})
+    now = time.monotonic()
+    for stale in [k for k, (seen, _) in boundaries.items() if now - seen > _BOUNDARY_TTL_SECONDS]:
+        boundaries.pop(stale, None)
+    boundaries.pop(key, None)
+    boundaries[key] = (now, reason or "Approval")
+
+
+def consume_boundary(adapter: Any, key: str) -> Optional[str]:
+    """The reason of the pause boundary that finalized this adapter/turn, once.
+
+    ``None`` means this transport finalize was not a pause: Hermes also finalizes at a tool
+    boundary or a flush barrier, where the turn keeps running in the same card.
+    """
+    boundaries = getattr(adapter, _BOUNDARIES_ATTR, {})
+    now = time.monotonic()
+    for stale in [k for k, (seen, _) in boundaries.items() if now - seen > _BOUNDARY_TTL_SECONDS]:
+        boundaries.pop(stale, None)
+    entry = boundaries.pop(key, None)
+    return entry[1] if entry else None
 
 
 def consume_approval_boundary(adapter: Any, key: str) -> bool:
-    """Consume only the matching adapter/turn's boundary, once."""
-    boundaries = getattr(adapter, "_cardkit_approval_boundaries", {})
-    now = time.monotonic()
-    for stale in [k for k, seen in boundaries.items() if now - seen > _BOUNDARY_TTL_SECONDS]:
-        boundaries.pop(stale, None)
-    return boundaries.pop(key, None) is not None
+    """Was this turn's pause an approval prompt (the case Hermes never re-opens itself)?"""
+    return consume_boundary(adapter, key) == "Approval"
 
 
 def _is_card_adapter(adapter: Any) -> bool:
@@ -64,16 +85,16 @@ def install_approval_reopen(*, consumer_cls: Optional[type] = None) -> bool:
     def close_for_approval_prompt(self, placeholder=None, reason="Approval", reopen=False):
         # Clarify already asks for reopen; approvals never do. Only our card platform
         # turns its approval boundary into a re-openable one.
-        if not reopen and reason != "Clarify" and _is_card_adapter(getattr(self, "adapter", None)):
-            reopen = True
-            # Only a boundary that will actually finalize an open stream needs the segment
-            # marker; otherwise a later turn in the same chat could inherit it.
+        if _is_card_adapter(getattr(self, "adapter", None)):
+            # Any pause boundary (approval or clarify) is a real stop of the card: only a
+            # boundary that will actually finalize an open stream needs the marker, so a later
+            # turn in the same chat cannot inherit it.
             if getattr(self, "_use_native_streaming", False) and getattr(self, "_native_stream_opened", False):
-                adapter = self.adapter
-                boundaries = adapter.__dict__.setdefault("_cardkit_approval_boundaries", {})
-                key = f"{getattr(self, 'chat_id', '')}:{getattr(self, '_turn_id', '') or 'default'}"
-                consume_approval_boundary(adapter, key)  # prune and replace any prior matching marker
-                boundaries[key] = time.monotonic()
+                mark_boundary(self.adapter,
+                              f"{getattr(self, 'chat_id', '')}:{getattr(self, '_turn_id', '') or 'default'}",
+                              reason)
+            if not reopen and reason != "Clarify":
+                reopen = True
         return original(self, placeholder, reason=reason, reopen=reopen)
 
     setattr(close_for_approval_prompt, _PATCHED_FLAG, True)
@@ -83,4 +104,4 @@ def install_approval_reopen(*, consumer_cls: Optional[type] = None) -> bool:
     return True
 
 
-__all__ = ["install_approval_reopen"]
+__all__ = ["install_approval_reopen", "mark_boundary", "consume_boundary", "consume_approval_boundary"]
