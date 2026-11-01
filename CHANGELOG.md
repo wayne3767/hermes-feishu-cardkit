@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.2 — 2026-11-01
+
+- **Tool lines no longer leak into the answer.** Hermes marks the composed frame around the
+  overlay in two ways the card read as prose, and the whole tool chain then landed in the answer
+  body, growing with every call (worst while a long python call ran):
+  `_append_progress_repeat_count` puts `(×N)` on its own line after a closing fence, and
+  `_send_or_edit`'s `ensure_closed_code_fences` closes a code block the *answer* left open after
+  the overlay. Both marks are now recognised, so the answer keeps only answer text and the card
+  keeps one activity line. A tail that repeats the overlay this card already showed is also
+  accepted as progress, and a segment finalize that carries that overlay loses it verbatim.
+- The cursor no longer sticks to a tool line when the frame ends with an appended fence.
+
 ## 0.8.1 — 2026-10-27
 
 - Add `platforms.feishu.card_model_label` / `FEISHU_CARD_MODEL_LABEL`: a profile-scoped

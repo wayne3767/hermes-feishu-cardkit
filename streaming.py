@@ -43,11 +43,12 @@ import json
 import io
 import logging
 import os
+import re
 import time
 import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from urllib.parse import unquote
 
 from .card_layout import (
@@ -115,6 +116,8 @@ _PROGRESS_SEPARATOR = "\n\n---\n"
 _CURSOR_CHARS = "▌▍▎▏█▉▊▋"
 # Tool-progress lines open with the tool emoji (get_tool_emoji / friendly verbs: 🔍 💻 📖 ⚙️ …).
 _EMOJI_RANGES = ((0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2300, 0x23FF), (0x2B00, 0x2BFF), (0x2190, 0x21FF), (0x2900, 0x297F))
+# A repeated tool line carries "(×N)"; Hermes puts it on its own line after a closing fence.
+_REPEAT_COUNTER = re.compile(r"^\(×\d+\)$")
 
 
 # --- Turn model -------------------------------------------------------------------------------
@@ -258,25 +261,79 @@ def _strip_cursor_line(lines: List[str]) -> List[str]:
     return lines
 
 
-def split_stream_frame(text: str, previous_answer: str = "") -> Tuple[str, List[str]]:
+def _fence_count(lines: List[str]) -> int:
+    return sum(1 for line in lines if line.strip().startswith("```"))
+
+
+def _overlay_tail(head: str, lines: List[str]) -> List[str]:
+    """The tool lines of a frame tail, without the marks Hermes adds to the composed frame.
+
+    Two marks would otherwise read as prose and hide every tool line in the answer body:
+    ``gateway.run_turn_progress._append_progress_repeat_count`` puts a repeat counter on its own
+    line after a closing fence, and ``stream_consumer._send_or_edit`` closes a code block the
+    *answer* left open after the overlay (``ensure_closed_code_fences`` runs on the whole frame).
+    The counter never belongs to the overlay, and the closing fence belongs to the answer's
+    block, which is why it is only dropped when that block is still open in ``head``."""
+    tail = [line.rstrip(_CURSOR_CHARS) for line in lines
+            if not _REPEAT_COUNTER.match(line.strip())]
+    significant = [line for line in tail if line.strip()]
+    if (significant and _fence_count(head.split("\n")) % 2 == 1
+            and _fence_count(significant) % 2 == 1 and significant[-1].strip().startswith("```")):
+        del tail[len(tail) - 1 - tail[::-1].index(significant[-1])]
+    return tail
+
+
+def _same_overlay(lines: Sequence[str], known: Sequence[str]) -> bool:
+    """Does this tail still open with the overlay this card already read as activity?"""
+    seen = [line.strip() for line in known if line.strip()]
+    tail = [line.strip() for line in lines if line.strip()]
+    return bool(seen) and tail[:len(seen)] == seen
+
+
+def strip_known_overlay(text: str, known: Sequence[str]) -> str:
+    """Drop the overlay this card already read when a finalize frame carries it verbatim.
+
+    Turn finals are composed from the answer alone, so this never fires for them; it is the
+    safety net for a segment finalize that arrives with the consumer's overlay attached."""
+    body = (text or "").rstrip(_CURSOR_CHARS)
+    seen = [line.strip() for line in known if line.strip()]
+    if not body or not seen:
+        return text
+    tail = "\n".join(seen)
+    if body.endswith(_PROGRESS_SEPARATOR + tail):
+        return body[:-len(_PROGRESS_SEPARATOR + tail)]
+    if body.strip() == tail:
+        return ""  # a tool-only frame: the answer never landed in this frame
+    return text
+
+
+def split_stream_frame(text: str, previous_answer: str = "",
+                       known_overlay: Sequence[str] = ()) -> Tuple[str, List[str]]:
     """Undo ``_compose_frame_content``: ``(answer, tool_lines)``.
 
     The split is only taken when the tail reads as a progress overlay AND the head is consistent
     with the answer streamed so far (cumulative frames only ever extend it), so a ``---`` rule
     inside the answer itself stays in the answer.  Before any answer text the consumer sends the
-    overlay bare, without the separator."""
+    overlay bare, without the separator.
+
+    ``known_overlay`` is the overlay this card already read from an earlier frame; a tail that
+    repeats it is progress even when a Hermes-side mark makes it read as prose."""
     prev = previous_answer.rstrip(_CURSOR_CHARS)
     idx = text.rfind(_PROGRESS_SEPARATOR)
     if idx < 0:
         bare = _strip_cursor_line(text.split("\n"))
-        if not prev and _looks_like_progress_overlay(bare):
-            return "", [line for line in bare if line.strip()]
+        lines = _overlay_tail("", bare)
+        if not prev and _looks_like_progress_overlay(lines):
+            return "", [line for line in lines if line.strip()]
         return text, []
-    head, lines = text[:idx], _strip_cursor_line(text[idx + len(_PROGRESS_SEPARATOR):].split("\n"))
+    head, raw = text[:idx], _strip_cursor_line(text[idx + len(_PROGRESS_SEPARATOR):].split("\n"))
     current = head.rstrip(_CURSOR_CHARS)
-    if not _looks_like_progress_overlay(lines) or (prev and current and not (current.startswith(prev) or prev.startswith(current))):
+    if prev and current and not (current.startswith(prev) or prev.startswith(current)):
         return text, []
-    return head, [line for line in lines if line.strip()]
+    lines = _overlay_tail(head, raw)
+    if _looks_like_progress_overlay(lines) or _same_overlay(lines, known_overlay):
+        return head, [line for line in lines if line.strip()]
+    return text, []
 
 
 def count_tool_entries(lines: List[str]) -> int:
@@ -568,7 +625,7 @@ class FeishuStreamingCardMixin:
 
     async def _push(self, turn: StreamCardTurn, text: str) -> bool:
         """Cumulative intermediate frame; failures are fire-and-forget (the next frame overwrites)."""
-        answer, overlay = split_stream_frame(text, turn.answer)
+        answer, overlay = split_stream_frame(text, turn.answer, turn.overlay)
         activity_changed = merge_overlay(turn, overlay)
         if turn.stale and not turn.streaming_closed:
             turn.streaming_closed = True
@@ -642,8 +699,10 @@ class FeishuStreamingCardMixin:
         turn.finished_at = time.monotonic()
         # Finalize frames are pure text (no overlay), so no split: an answer that happens to open
         # with an emoji line must not be mistaken for tool progress — and one that was, earlier in
-        # the stream, is corrected below for the legacy overlay fallback.
-        final = (text or turn.answer or self._labels.tool_only).rstrip(_CURSOR_CHARS)
+        # the stream, is corrected below for the legacy overlay fallback.  A segment finalize that
+        # still carries the overlay this card already read loses it verbatim.
+        final = strip_known_overlay(text or turn.answer, turn.overlay)
+        final = (final or turn.answer or self._labels.tool_only).rstrip(_CURSOR_CHARS)
         # Legacy overlay parsing can mistake an emoji-led answer for one tool header.
         # Official tool events never need this textual inference.
         if (not turn.tools_observed and turn.tool_total == 1 and turn.timeline

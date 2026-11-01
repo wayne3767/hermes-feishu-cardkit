@@ -173,6 +173,49 @@ class TestFrameParsing:
         lines = ["🔍 Searching", "💻 terminal", "```", "ls", "```", "```", "pwd", "```"]
         assert fs.count_tool_entries(lines) == 3
 
+    def test_answer_still_inside_a_code_fence_does_not_hide_the_tool_line(self):
+        # Hermes closes an open answer fence AFTER the overlay (ensure_closed_code_fences runs on
+        # the composed frame), which used to read as prose and dump every tool line into the answer.
+        head = "代码如下：\n```python\nimport pandas as pd\n"
+        frame = head + SEP + "🐍 运行代码：df.head()▌\n```"
+        assert fs.split_stream_frame(frame) == (head, ["🐍 运行代码：df.head()"])
+
+    def test_repeat_counter_line_never_joins_the_answer(self):
+        # _append_progress_repeat_count puts "(×N)" on its own line after a closing fence, and a
+        # repeated command appends that marked copy as a second overlay entry.
+        head = "前文"
+        frame = head + SEP + "💻 运行命令\n```\npython3 x.py\n```\n(×2)▌"
+        answer, lines = fs.split_stream_frame(frame)
+        assert answer == head
+        assert lines == ["💻 运行命令", "```", "python3 x.py", "```"]
+        doubled = head + SEP + "💻 运行命令\n```\npython3 x.py\n```\n💻 运行命令\n```\npython3 x.py\n```\n(×2)▌"
+        assert fs.split_stream_frame(doubled)[0] == head
+        assert fs.count_tool_entries(fs.split_stream_frame(doubled)[1]) == 2
+
+    def test_known_overlay_splits_a_tail_that_reads_as_prose(self):
+        # Even when a Hermes-side mark defeats the shape check, the lines this card already
+        # showed as activity are never answer text.
+        head = "前文"
+        frame = head + SEP + "💻 运行命令\n```\nls\n```\n(×7)▌"
+        assert fs.split_stream_frame(frame, known_overlay=["💻 运行命令", "```", "ls", "```"]) == (
+            head, ["💻 运行命令", "```", "ls", "```"])
+
+    def test_an_open_answer_fence_keeps_its_own_closing_fence(self):
+        # A balanced tail is the overlay's own block: the answer's fence is not closed by it.
+        frame = "答案\n" + SEP + "💻 terminal\n```\nls\n```▌"
+        assert fs.split_stream_frame(frame) == ("答案\n", ["💻 terminal", "```", "ls", "```"])
+
+    def test_emoji_prose_after_a_rule_and_a_blank_line_stays_in_the_answer(self):
+        # A blank line never appears in a tool overlay, so it still marks the tail as prose.
+        frame = "Part one" + SEP + "\n🐍 这是正文里的表情行"
+        assert fs.split_stream_frame(frame, previous_answer="Part one") == (frame, [])
+
+    def test_finalize_drops_an_overlay_it_already_read(self):
+        assert fs.strip_known_overlay("答案" + SEP + "🐍 运行代码：x", ["🐍 运行代码：x"]) == "答案"
+        assert fs.strip_known_overlay("🐍 运行代码：x▌", ["🐍 运行代码：x"]) == ""
+        assert fs.strip_known_overlay("答案", ["🐍 运行代码：x"]) == "答案"
+        assert fs.strip_known_overlay("答案" + SEP + "🐍 别的", ["🐍 运行代码：x"]) == "答案" + SEP + "🐍 别的"
+
     def test_merge_overlay_appends_only_new_lines(self):
         turn = fs.StreamCardTurn(card_id="c", message_id="m", chat_id=CHAT)
         assert fs.merge_overlay(turn, ["a"]) is True
@@ -416,6 +459,23 @@ class TestTurnLifecycle:
         assert not turn.activity_dirty
         actions = json.loads(fake.named("batch")[-1].request_body.actions)
         assert actions[0]["params"]["partial_element"]["content"] == "🔍 Searching"
+
+    def test_tool_line_stays_out_of_the_answer_while_it_is_inside_a_code_fence(self):
+        """The reported bug: with python in the answer the tool line landed in the card body and
+        the answer kept growing with every call instead of showing one activity line."""
+        adapter, fake = _adapter()
+        _run(adapter.send_stream_frame("", chat_id=CHAT, turn_id="t1"))
+        head = "代码如下：\n```python\nimport pandas as pd\n"
+        _run(adapter.send_stream_frame(head + "▌", chat_id=CHAT, turn_id="t1"))
+        _run(adapter.send_stream_frame(head + SEP + "🐍 运行代码：df.head()▌\n```", chat_id=CHAT, turn_id="t1"))
+        turn = adapter._stream_cards[f"{CHAT}:t1"]
+        assert turn.answer == head, "the answer keeps only the answer text"
+        assert turn.overlay == ["🐍 运行代码：df.head()"], "the cursor and Hermes' closing fence stay out of it"
+        assert fake.pushes(cl.ANSWER_ELEMENT_ID)[-1] == head
+        actions = json.loads(fake.named("batch")[-1].request_body.actions)
+        by_id = {a["params"]["element_id"]: a["params"]["partial_element"] for a in actions}
+        assert by_id[cl.ACTIVITY_ELEMENT_ID]["content"] == "🐍 运行代码：df.head()"
+        assert turn.tool_count == 1
 
     def test_finalize_lands_text_then_seals_with_completed_layout(self):
         adapter, fake = _adapter()

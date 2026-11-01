@@ -2,7 +2,7 @@
 
 Native streaming cards for the Feishu / Lark channel of [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Version **0.8.1** adds a profile-specific public model label to the live activity and status · duration · decode speed · model footer.
+Version **0.8.2** keeps the tool chain out of the answer body when the answer is mid-code-block or a tool line repeats.
 
 [English](#english) · [中文](#中文)
 
